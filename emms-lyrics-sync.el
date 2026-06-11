@@ -1,4 +1,4 @@
-;;; emms-lyrics.el --- Synchronized lyrics display for EMMS  -*- lexical-binding: t -*-
+;;; emms-lyrics-sync.el --- Synchronized lyrics display for EMMS  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync.el
 ;; Created : 2026-06-11 23:00 UTC
 ;; Purpose : Package entry point.  Provides the global minor mode
@@ -217,4 +217,4 @@ Creates the file if it does not exist."
     (find-file lrc)))
 
 (provide 'emms-lyrics-sync)
-;;; emms-lyrics.el ends here
+;;; emms-lyrics-sync.el ends here
