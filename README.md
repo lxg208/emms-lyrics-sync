@@ -1,4 +1,4 @@
-# emms-lyrics
+# emms-lyrics-sync
 
 > ⚠️ **Work in progress — not functional yet.**
 > The package is under active development. No user-facing features are
