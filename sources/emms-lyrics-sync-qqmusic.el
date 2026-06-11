@@ -224,4 +224,4 @@ CALLBACK is called with an `emms-lyrics-sync-result' or nil."
                  (funcall callback nil)))))
 
 (provide 'emms-lyrics-sync-qqmusic)
-;;; sources/emms-lyrics-sync-qqmusic.el ends here
+;;; emms-lyrics-sync-qqmusic.el ends here

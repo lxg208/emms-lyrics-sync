@@ -1,4 +1,4 @@
-;; emms-lyrics-sync-pkg.el --- Package descriptor for emms-lyrics-sync  -*- lexical-binding: t -*-
+;;; emms-lyrics-sync-pkg.el --- Package descriptor for emms-lyrics-sync  -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 (define-package "emms-lyrics-sync" "0.1.0"
   "Synchronized lyrics display for EMMS."
@@ -7,3 +7,5 @@
     (plz   "0.7"))
   :keywords '("multimedia" "lyrics" "emms")
   :url "https://github.com/lxg208/emms-lyrics-sync")
+
+;;; emms-lyrics-sync-pkg.el ends here

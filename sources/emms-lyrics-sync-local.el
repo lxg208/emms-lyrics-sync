@@ -163,4 +163,4 @@ Calls CALLBACK synchronously with an `emms-lyrics-sync-result' or nil."
                            (buffer-string)))))))
 
 (provide 'emms-lyrics-sync-local)
-;;; sources/emms-lyrics-sync-local.el ends here
+;;; emms-lyrics-sync-local.el ends here

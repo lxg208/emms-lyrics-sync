@@ -245,4 +245,4 @@ CALLBACK is called with an `emms-lyrics-sync-result' or nil."
                  (funcall callback nil)))))
 
 (provide 'emms-lyrics-sync-netease)
-;;; sources/emms-lyrics-sync-netease.el ends here
+;;; emms-lyrics-sync-netease.el ends here

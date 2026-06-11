@@ -165,4 +165,4 @@ Skips the request when artist or title is missing."
                  (emms-lyrics-sync-lrclib--handle-error err callback)))))
 
 (provide 'emms-lyrics-sync-lrclib)
-;;; sources/emms-lyrics-sync-lrclib.el ends here
+;;; emms-lyrics-sync-lrclib.el ends here

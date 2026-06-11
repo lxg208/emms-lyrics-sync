@@ -110,4 +110,4 @@ CALLBACK is called with an `emms-lyrics-sync-result' or nil."
                  (funcall callback nil)))))
 
 (provide 'emms-lyrics-sync-lyricsovh)
-;;; sources/emms-lyrics-sync-lyricsovh.el ends here
+;;; emms-lyrics-sync-lyricsovh.el ends here
