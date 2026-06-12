@@ -246,7 +246,7 @@ Safe to call repeatedly — returns immediately if already connected."
                 emms-lyrics-sync-core--mpv-buffer   "")
           t)
       (error
-       (message "emms-lyrics: mpv IPC connect failed: %S" err)
+       (unless (string-match-p "Connection refused" (format "%S" err)) (message "emms-lyrics: mpv IPC connect failed: %S" err))
        nil))))
 
 (defun emms-lyrics-sync-core--mpv-request-position ()
@@ -331,7 +331,7 @@ the position from the previous 100 ms tick — an imperceptible lag."
 
 (defun emms-lyrics-sync-skip-genre-p (track)
   "Return t if TRACK's genre is in `emms-lyrics-sync-skip-genres'."
-  (when-let ((genre (emms-lyrics-sync-track-genre track)))
+  (when-let* ((genre (emms-lyrics-sync-track-genre track)))
     (cl-some (lambda (g) (string-equal-ignore-case genre g))
              emms-lyrics-sync-skip-genres)))
 
@@ -453,13 +453,16 @@ Increments the fetch token, checks caches, then runs the source pipeline.
 Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
   ;; Increment token to invalidate any in-flight fetches for the old track
   (cl-incf emms-lyrics-sync-core--fetch-token)
+  ;; Delayed connect — mpv socket may not be ready immediately on track start
+  (when emms-lyrics-sync-mpv-ipc-enabled
+    (run-with-timer 1.0 nil #'emms-lyrics-sync-core--mpv-connect))
   (let ((token emms-lyrics-sync-core--fetch-token))
     (setq emms-lyrics-sync-core--current-track  track
           emms-lyrics-sync-core--current-result nil)
 
     ;; Notify display immediately so it can show track info even without lyrics
     (when (fboundp 'emms-lyrics-sync-display-on-track-change)
-      (emms-lyrics-sync-display-on-track-change track nil))
+      (emms-lyrics-sync-display-on-track-change))
 
     ;; Skip check
     (when (emms-lyrics-sync-core--should-skip-p track)
@@ -471,7 +474,7 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
       (when cached
         (setq emms-lyrics-sync-core--current-result cached)
         (when (fboundp 'emms-lyrics-sync-display-on-track-change)
-          (emms-lyrics-sync-display-on-track-change track cached))
+          (emms-lyrics-sync-display-on-track-change))
         (cl-return-from emms-lyrics-sync-core--on-track-change)))
 
     ;; On-disk sidecar hit
@@ -479,10 +482,10 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
       (when sidecar-result
         (let ((parsed (emms-lyrics-sync-core--parse-result sidecar-result)))
           (setq emms-lyrics-sync-core--current-result parsed)
-          (when-let ((fp (emms-lyrics-sync-track-file-path track)))
+          (when-let* ((fp (emms-lyrics-sync-track-file-path track)))
             (puthash fp parsed emms-lyrics-sync-core--cache))
           (when (fboundp 'emms-lyrics-sync-display-on-track-change)
-            (emms-lyrics-sync-display-on-track-change track parsed))
+            (emms-lyrics-sync-display-on-track-change))
           (cl-return-from emms-lyrics-sync-core--on-track-change))))
 
     ;; Run source pipeline asynchronously
@@ -494,14 +497,14 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
            (setq emms-lyrics-sync-core--current-result parsed)
            ;; Cache and persist
            (when parsed
-             (when-let ((fp (emms-lyrics-sync-track-file-path track)))
+             (when-let* ((fp (emms-lyrics-sync-track-file-path track)))
                (puthash fp parsed emms-lyrics-sync-core--cache))
              (when (eq (emms-lyrics-sync-result-format parsed) 'lrc)
                (emms-lyrics-sync-core--write-sidecar
                 track (emms-lyrics-sync-result-content parsed))))
            ;; Update display with real lyrics
            (when (fboundp 'emms-lyrics-sync-display-on-track-change)
-             (emms-lyrics-sync-display-on-track-change track parsed))))))))
+             (emms-lyrics-sync-display-on-track-change))))))))
 
 (defun emms-lyrics-sync-core--on-stop ()
   "Handle playback stop/pause.
@@ -509,6 +512,9 @@ Disconnects mpv IPC and notifies the display."
   (setq emms-lyrics-sync-core--current-track  nil
         emms-lyrics-sync-core--current-result nil)
   (cl-incf emms-lyrics-sync-core--fetch-token)
+  ;; Delayed connect — mpv socket may not be ready immediately on track start
+  (when emms-lyrics-sync-mpv-ipc-enabled
+    (run-with-timer 1.0 nil #'emms-lyrics-sync-core--mpv-connect))
   ;; Don't disconnect IPC on stop — mpv may still be running (paused)
   ;; The display is notified via emms-lyrics-sync--on-track-stop in emms-lyrics.el
   )
