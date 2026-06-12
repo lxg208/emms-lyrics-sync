@@ -150,20 +150,20 @@ exceeding `emms-lyrics-sync-netease-min-score', or nil if none qualifies."
       (let* ((obj      (json-parse-string body :object-type 'alist
                                                :null-object nil
                                                :false-object nil))
-             (result   (cdr (assoc "result" obj)))
-             (songs    (cdr (assoc "songs"  result))))
+             (result   (cdr (assq 'result obj)))
+             (songs    (cdr (assq 'songs  result))))
         (when (and songs (> (length songs) 0))
           (let ((best-id    nil)
                 (best-score -1.0))
             (cl-loop for song across songs do
-              (let* ((id      (cdr (assoc "id"   song)))
-                     (name    (cdr (assoc "name" song)))
-                     (artists (cdr (assoc "artists" song)))
+              (let* ((id      (cdr (assq 'id   song)))
+                     (name    (cdr (assq 'name song)))
+                     (artists (cdr (assq 'artists song)))
                      ;; artists is an array; join first names for matching
                      (artist-str
                       (when (and artists (> (length artists) 0))
                         (mapconcat
-                         (lambda (a) (or (cdr (assoc "name" a)) ""))
+                         (lambda (a) (or (cdr (assq 'name a)) ""))
                          artists " ")))
                      (score (emms-lyrics-sync-netease--score
                              artist-str name want-artist want-title)))
@@ -191,7 +191,7 @@ exceeding `emms-lyrics-sync-netease-min-score', or nil if none qualifies."
                                                :null-object nil
                                                :false-object nil))
              (nolyric  (cdr (assoc "nolyric"     obj)))
-             (uncoll   (cdr (assoc "uncollected" obj)))
+             (uncoll   (cdr (assq 'uncollected obj)))
              (lrc-obj  (cdr (assoc "lrc"         obj)))
              (lrc-str  (and lrc-obj (cdr (assoc "lyric" lrc-obj)))))
         (cond

@@ -171,10 +171,10 @@ Reconnects mpv IPC if it was dropped while paused."
 Pre-fills all metadata fields from the track; the user may edit them
 before confirming the search with \\[emms-lyrics-sync-search-execute]."
   (interactive)
-  (let ((t (or track emms-lyrics-sync-core--current-track)))
-    (unless t
+  (let ((cur-track (or track emms-lyrics-sync-core--current-track)))
+    (unless cur-track
       (user-error "No track is currently playing"))
-    (emms-lyrics-sync-search-open t)))
+    (emms-lyrics-sync-search--query-parallel cur-track)))
 
 ;;;###autoload
 (defun emms-lyrics-sync-next-source ()

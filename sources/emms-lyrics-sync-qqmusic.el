@@ -130,21 +130,21 @@ Candidates scoring below this threshold are rejected."
                                             :null-object nil
                                             :false-object nil))
              ;; Path: data → song → list
-             (data  (cdr (assoc "data" obj)))
-             (song  (cdr (assoc "song" data)))
-             (items (cdr (assoc "list" song))))
+             (data  (cdr (assq 'data obj)))
+             (song  (cdr (assq 'song data)))
+             (items (cdr (assq 'list song))))
         (when (and items (> (length items) 0))
           (let ((best-mid   nil)
                 (best-score -1.0))
             (cl-loop for item across items do
-              (let* ((mid        (cdr (assoc "songmid" item)))
-                     (name       (cdr (assoc "songname" item)))
+              (let* ((mid        (cdr (assq 'songmid item)))
+                     (name       (cdr (assq 'songname item)))
                      ;; singer is an array of objects with "name"
-                     (singers    (cdr (assoc "singer" item)))
+                     (singers    (cdr (assq 'singer item)))
                      (artist-str
                       (when (and singers (> (length singers) 0))
                         (mapconcat
-                         (lambda (s) (or (cdr (assoc "name" s)) ""))
+                         (lambda (s) (or (cdr (assq 'name s)) ""))
                          singers " ")))
                      (score (emms-lyrics-sync-qqmusic--score
                              artist-str name want-artist want-title)))
@@ -172,7 +172,7 @@ The `lyric' field is base64-encoded LRC; we decode it here."
       (let* ((obj     (json-parse-string body :object-type 'alist
                                               :null-object nil
                                               :false-object nil))
-             (b64     (cdr (assoc "lyric" obj)))
+             (b64     (cdr (assq 'lyric obj)))
              (decoded (and (stringp b64)
                            (not (string-empty-p (string-trim b64)))
                            (base64-decode-string b64))))

@@ -151,13 +151,7 @@ constant-0.5 placeholder vector on failure."
                   :command  (list "ffmpeg"
                                   "-i" (expand-file-name file-path)
                                   "-filter:a"
-                                  (format "aresample=8000,asegment=duration=%.4f,astats=metadata=1:reset=1"
-                                          ;; Aim for n-chunks segments; ffmpeg
-                                          ;; uses duration per segment.
-                                          ;; We estimate from a 4-minute default.
-                                          ;; Actual duration unknown here — a
-                                          ;; post-hoc trim adjusts the count.
-                                          (/ 240.0 (float n-chunks)))
+                                  (format "aresample=8000,astats=metadata=1:reset=400")
                                   "-map" "0:a:0" "-f" "null" "-")
                   :stderr   buf
                   :noquery  t)))

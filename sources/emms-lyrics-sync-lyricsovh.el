@@ -67,8 +67,8 @@ Both path components are percent-encoded."
                                            :null-object nil
                                            :false-object nil))
              ;; Miss: { "error": "No lyrics found" }
-             (err-field (cdr (assoc "error" obj)))
-             (lyrics    (cdr (assoc "lyrics" obj))))
+             (err-field (cdr (assq 'error obj)))
+             (lyrics    (cdr (assq 'lyrics obj))))
         (cond
          (err-field nil)
          ((and (stringp lyrics)

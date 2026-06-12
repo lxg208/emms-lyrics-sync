@@ -97,9 +97,9 @@ Returns nil when:
                                      :false-object nil))
              ;; json-parse-string with :object-type 'alist returns
              ;; string keys, not symbols.
-             (instrumental (cdr (assoc "instrumental" obj)))
-             (synced       (cdr (assoc "syncedLyrics" obj)))
-             (plain        (cdr (assoc "plainLyrics"  obj))))
+             (instrumental (cdr (assq 'instrumental obj)))
+             (synced       (cdr (assq 'syncedLyrics obj)))
+             (plain        (cdr (assq 'plainLyrics  obj))))
         (cond
          ;; Instrumental — no lyrics expected.
          (instrumental
