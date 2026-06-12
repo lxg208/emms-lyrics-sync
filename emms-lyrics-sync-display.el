@@ -360,21 +360,34 @@ Sets `emms-lyrics-sync-display--word-positions' when the current line is A2."
            (before  (alist-get 'before  ctx))
            (current (alist-get 'current ctx))
            (after   (alist-get 'after   ctx)))
-      (dolist (line before)
-        (emms-lyrics-sync-display--render-plain-line line 'emms-lyrics-sync-past-line-face))
-      (when current
-        (insert "\n")
-        (if (emms-lyrics-sync-line-words current)
-            ;; A2: per-word render with position capture
-            (setq emms-lyrics-sync-display--word-positions
-                  (emms-lyrics-sync-display--render-a2-line current))
-          ;; Standard LRC: single face for the whole line
+      (if (and (null before) (null current) (null after))
+          ;; pos is before the first timestamp (e.g. pos=0 at track start).
+          ;; Show the first N upcoming lines as future context so the buffer
+          ;; is not empty while waiting for the song to reach the first lyric.
+          (let ((lines (emms-lyrics-sync-lrc-doc-lines doc)))
+            (cl-loop for i from 0
+                     below (min emms-lyrics-sync-display-context-after
+                                (length lines))
+                     do (emms-lyrics-sync-display--render-plain-line
+                         (aref lines i)
+                         'emms-lyrics-sync-future-line-face)))
+        ;; Normal case: render context window
+        (dolist (line before)
           (emms-lyrics-sync-display--render-plain-line
-           current 'emms-lyrics-sync-current-line-face))
-        (insert "\n"))
-      (dolist (line after)
-        (emms-lyrics-sync-display--render-plain-line
-         line 'emms-lyrics-sync-future-line-face))))))
+           line 'emms-lyrics-sync-past-line-face))
+        (when current
+          (insert "\n")
+          (if (emms-lyrics-sync-line-words current)
+              ;; A2: per-word render with position capture
+              (setq emms-lyrics-sync-display--word-positions
+                    (emms-lyrics-sync-display--render-a2-line current))
+            ;; Standard LRC: single face for the whole line
+            (emms-lyrics-sync-display--render-plain-line
+             current 'emms-lyrics-sync-current-line-face))
+          (insert "\n"))
+        (dolist (line after)
+          (emms-lyrics-sync-display--render-plain-line
+           line 'emms-lyrics-sync-future-line-face)))))))
 
 ;;; ── Overlay Management ───────────────────────────────────────────────────────
 
@@ -507,15 +520,11 @@ Preserves the cover art and header."
                        (point-max))
         (goto-char (marker-position emms-lyrics-sync-display--lyrics-marker))
         (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-        ;; Re-append waveform
-        (when (fboundp 'emms-lyrics-sync-waveform-insert)
-          (let ((track emms-lyrics-sync-core--current-track))
-            (when track
-              (insert "\n")
-              (emms-lyrics-sync-waveform-insert
-               (emms-lyrics-sync-track-file-path track)
-               (/ pos-ms 1000.0)
-               (emms-lyrics-sync-track-duration track)))))))))
+        ;; NOTE: waveform is NOT re-appended here.
+        ;; It is managed exclusively by full-redraw and the async extraction
+        ;; callback.  Appending it here caused one waveform per lyric line
+        ;; advance (~every 5-6 s).
+        ))))
 
 ;;; ── Timer ────────────────────────────────────────────────────────────────────
 

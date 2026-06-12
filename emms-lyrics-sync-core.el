@@ -456,11 +456,13 @@ CALLBACK is called with an `emms-lyrics-sync-result' or nil."
   "Handle a track change event for TRACK (an `emms-lyrics-sync-track').
 Increments the fetch token, checks caches, then runs the source pipeline.
 Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
+  (cl-block emms-lyrics-sync-core--on-track-change
   ;; Increment token to invalidate any in-flight fetches for the old track
   (cl-incf emms-lyrics-sync-core--fetch-token)
   ;; Delayed connect — mpv socket may not be ready immediately on track start
   (when emms-lyrics-sync-mpv-ipc-enabled
     (run-with-timer 1.0 nil #'emms-lyrics-sync-core--mpv-connect))
+  (catch 'emms-lyrics-sync-core--on-track-change-done
   (let ((token emms-lyrics-sync-core--fetch-token))
     (setq emms-lyrics-sync-core--current-track  track
           emms-lyrics-sync-core--current-result nil)
@@ -471,7 +473,7 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
 
     ;; Skip check
     (when (emms-lyrics-sync-core--should-skip-p track)
-      (cl-return-from emms-lyrics-sync-core--on-track-change))
+      (throw 'emms-lyrics-sync-core--on-track-change-done nil))
 
     ;; In-memory cache hit
     (let* ((fp     (emms-lyrics-sync-track-file-path track))
@@ -480,7 +482,7 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
         (setq emms-lyrics-sync-core--current-result cached)
         (when (fboundp 'emms-lyrics-sync-display-on-track-change)
           (emms-lyrics-sync-display-on-track-change))
-        (cl-return-from emms-lyrics-sync-core--on-track-change)))
+        (throw 'emms-lyrics-sync-core--on-track-change-done nil)))
 
     ;; On-disk sidecar hit
     (let ((sidecar-result (emms-lyrics-sync-core--check-sidecar track)))
@@ -491,7 +493,7 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
             (puthash fp parsed emms-lyrics-sync-core--cache))
           (when (fboundp 'emms-lyrics-sync-display-on-track-change)
             (emms-lyrics-sync-display-on-track-change))
-          (cl-return-from emms-lyrics-sync-core--on-track-change))))
+          (throw 'emms-lyrics-sync-core--on-track-change-done nil))))
 
     ;; Run source pipeline asynchronously
     (emms-lyrics-sync-core--try-sources
@@ -511,6 +513,9 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
            (when (fboundp 'emms-lyrics-sync-display-on-track-change)
              (emms-lyrics-sync-display-on-track-change))))))))
 
+  ) ;; end cl-block
+
+  ) ;; end catch
 (defun emms-lyrics-sync-core--on-stop ()
   "Handle playback stop/pause.
 Disconnects mpv IPC and notifies the display."
