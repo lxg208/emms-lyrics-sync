@@ -66,7 +66,7 @@
                (:constructor emms-lyrics-sync-lrc-doc--make)
                (:copier nil))
   "Complete parsed LRC document returned by `emms-lyrics-sync-lrc-parse'."
-  (lines     #()  :type vector
+  (lines     []   :type vector
              :documentation "Vector of `emms-lyrics-sync-line', sorted ascending by start-ms.")
   (title     nil  :type (or null string))
   (artist    nil  :type (or null string))
