@@ -36,6 +36,11 @@
 
 ;;; Code:
 
+;; Add sources/ subdirectory to load-path
+(add-to-list (quote load-path)
+             (expand-file-name "sources"
+                              (file-name-directory (or load-file-name buffer-file-name))))
+
 (require 'emms)
 (require 'emms-playlist-mode)
 (require 'emms-playing-time)
