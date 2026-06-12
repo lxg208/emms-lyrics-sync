@@ -207,8 +207,8 @@ Updates `emms-lyrics-sync-core--mpv-position' when a time-pos response arrives."
                                           :object-type  'alist
                                           :null-object  nil
                                           :false-object nil))
-                 (err  (cdr (assoc "error" obj)))
-                 (data (cdr (assoc "data"  obj))))
+                 (err  (cdr (assq 'error obj)))
+                 (data (cdr (assq 'data  obj))))
             (when (and (equal err "success") (numberp data))
               (setq emms-lyrics-sync-core--mpv-position (float data))))
         ;; Ignore malformed lines (mpv also emits event objects)
