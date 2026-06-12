@@ -247,7 +247,7 @@ start-ms (timed lines first, plain text lines at the end)."
     (dolist (raw (split-string string "\n"))
       (let ((line (string-trim raw)))
         (unless (string-empty-p line)
-          (when-let ((result (emms-lyrics-sync-lrc--parse-line line)))
+          (when-let* ((result (emms-lyrics-sync-lrc--parse-line line)))
             (pcase result
               (`(:meta ,key ,val)
                (pcase (downcase key)
@@ -360,7 +360,7 @@ If DOC is empty, returns nil."
 (defun emms-lyrics-sync-lrc-active-word (line pos-ms)
   "Return the `emms-lyrics-sync-word' active at POS-MS within LINE, or nil.
 Returns nil for lines without A2 word data or when POS-MS < first word."
-  (when-let ((words (emms-lyrics-sync-line-words line)))
+  (when-let* ((words (emms-lyrics-sync-line-words line)))
     (cl-loop for word in words
              when (and (<= (emms-lyrics-sync-word-start-ms word) pos-ms)
                        (or (null (emms-lyrics-sync-word-end-ms word))

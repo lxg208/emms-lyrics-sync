@@ -134,7 +134,7 @@ Keybindings (global when mode is active):
   "Called by `emms-player-started-hook'.
 Extracts metadata from the current EMMS track and kicks off the fetch pipeline."
   (condition-case err
-      (when-let ((emms-track (emms-playlist-current-selected-track)))
+      (when-let* ((emms-track (emms-playlist-current-selected-track)))
         (let ((track (emms-lyrics-sync-core--extract-track emms-track)))
           (emms-lyrics-sync-core--on-track-change track)))
     (error
@@ -200,7 +200,7 @@ Useful after manually editing a .lrc sidecar file."
   (unless emms-lyrics-sync-core--current-track
     (user-error "No track is currently playing"))
   ;; Evict from in-memory cache
-  (when-let ((fp (emms-lyrics-sync-track-file-path emms-lyrics-sync-core--current-track)))
+  (when-let* ((fp (emms-lyrics-sync-track-file-path emms-lyrics-sync-core--current-track)))
     (remhash fp emms-lyrics-sync-core--cache))
   ;; Re-trigger the pipeline
   (emms-lyrics-sync-core--on-track-change emms-lyrics-sync-core--current-track)

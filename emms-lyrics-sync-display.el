@@ -449,7 +449,7 @@ Uses `emms-lyrics-sync-display--elapsed-marker' to avoid a full redraw."
          (result  emms-lyrics-sync-core--current-result)
          (doc     (when result (emms-lyrics-sync-result-doc result)))
          (pos-ms  (round (* 1000.0
-                            (or (emms-lyrics-sync-core--playback-position) 0))))
+                            (or (emms-lyrics-sync-core--playback-position-ms) 0))))
          (buf     (emms-lyrics-sync-display--get-buffer)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -541,7 +541,7 @@ Preserves the cover art and header."
     (condition-case err
         (let* ((result  emms-lyrics-sync-core--current-result)
                (doc     (when result (emms-lyrics-sync-result-doc result)))
-               (pos-s   (emms-lyrics-sync-core--playback-position))
+               (pos-s   (emms-lyrics-sync-core--playback-position-ms))
                (pos-ms  (round (* 1000.0 (or pos-s 0))))
                (new-idx (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1)))
           ;; Elapsed time — every tick
@@ -587,7 +587,7 @@ Preserves the cover art and header."
 (defun emms-lyrics-sync-display-hide ()
   "Hide the emms-lyrics-sync side window."
   (interactive)
-  (when-let ((win (emms-lyrics-sync-display--window)))
+  (when-let* ((win (emms-lyrics-sync-display--window)))
     (delete-window win)))
 
 ;;;###autoload
