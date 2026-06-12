@@ -227,6 +227,11 @@ Cleans up state on disconnect so the next tick reconnects automatically."
   "Attempt to connect to the mpv IPC socket.
 Returns t on success, nil if the socket is absent or connection fails.
 Safe to call repeatedly — returns immediately if already connected."
+  ;; Read fresh socket path at connect time — emms-player-simple-mpv
+  ;; regenerates it on every mpv start, so we must read it here not at
+  ;; config time.  Guarded by boundp so there is no hard dependency.
+  (when (boundp 'emms-player-simple-mpv--socket)
+    (setq emms-lyrics-sync-mpv-socket emms-player-simple-mpv--socket))
   (when (and emms-lyrics-sync-mpv-ipc-enabled
              (not (process-live-p emms-lyrics-sync-core--mpv-process))
              (file-exists-p emms-lyrics-sync-mpv-socket))
