@@ -1,6 +1,6 @@
 ;;; emms-lyrics-sync-display-vars.el --- Customization, faces, state variables and utilities  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-display-vars.el
-;; Created : 2026-06-13 04:25 UTC
+;; Created : 2026-06-13 05:35 UTC
 ;; Purpose : Shared definitions for the emms-lyrics-sync display subsystem.
 ;;           Declares all defcustom options, defface faces, and defvar state
 ;;           variables used across the display subsystem.  Also provides four
@@ -77,6 +77,19 @@
 
 (defcustom emms-lyrics-sync-display-context-after 6
   "Number of upcoming lyrics lines visible below the current line."
+  :type  'integer
+  :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-lyrics-height 12
+  "Total number of physical screen lines reserved for the lyrics area.
+The lyrics section always occupies exactly this many lines regardless of
+line wrapping or playback position.  The value should satisfy:
+  context-before + context-after + 3 = lyrics-height
+with the default values 3 + 6 + 3 = 12.
+
+Increase on larger displays or when using a smaller font.  The value
+can be changed at any time with setq; it takes effect on the next
+full redraw (track change)."
   :type  'integer
   :group 'emms-lyrics-sync)
 
@@ -183,31 +196,29 @@ advances to mark the new end after each insert.")
 (defvar emms-lyrics-sync-display--lyrics-marker nil
   "Marker at the start of the lyrics section (NIL insertion-type).
 `redraw-lyrics-only' deletes from here to point-max and re-inserts.
-NIL type means the marker never advances on insert, so the boundary
-is always correct across multiple partial redraws.")
+NIL type keeps this boundary fixed regardless of inserts at the position.")
 
 (defvar emms-lyrics-sync-display--waveform-marker nil
   "Marker at the start of the waveform bar content (NIL insertion-type).
-Set after the separator newline, before waveform content.
-`update-waveform-cursor' deletes from here to point-max to replace the bar.")
+Set after the separator newline, before bar content.  NIL type keeps
+the marker anchored so `update-waveform-cursor' always replaces exactly
+the bar region without drifting into the lyrics above.")
 
 (defvar emms-lyrics-sync-display--current-file-path nil
   "File path of the track currently rendered in the lyrics buffer.
-Compared on each `display-on-track-change' call to decide between a full
-redraw (new track) and a partial lyrics+waveform update (same track).
-Reset to nil by `display-on-stop' so the next play triggers a full redraw.")
+Used to distinguish new-track (full redraw) from same-track (partial update).
+Reset to nil on stop so the next play always triggers a full redraw.")
 
 (defvar emms-lyrics-sync-display--tick-counter 0
   "Counter incremented every display tick.
-Throttles `update-waveform-cursor' to ~1/s (every 10 ticks).")
+Throttles waveform cursor updates to ~1/s (every 10 ticks).")
 
 (defvar emms-lyrics-sync-display--word-positions nil
-  "Vector of (buf-start buf-end emms-lyrics-sync-word) triples for the current
-A2 line.  Populated during lyrics redraw; consumed each tick by
-`update-word-overlays'.")
+  "Vector of (buf-start buf-end emms-lyrics-sync-word) triples for the
+current A2 line.  Populated during lyrics redraw; consumed by the tick.")
 
 (defvar emms-lyrics-sync-display--cover-cache (make-hash-table :test #'equal)
-  "Cache: cover-file-path → Emacs image object.")
+  "Cache: file-path → Emacs image object.")
 
 ;;; ── Utilities ────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 ;;; emms-lyrics-sync-display-render.el --- Buffer-insert rendering functions  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-display-render.el
-;; Created : 2026-06-13 04:25 UTC
+;; Created : 2026-06-13 05:35 UTC
 ;; Purpose : All buffer-insert rendering functions for the emms-lyrics-sync
 ;;           display subsystem.  Covers:
 ;;             • Cover art — synchronous ffmpeg extraction to a STABLE cache
@@ -18,9 +18,12 @@
 ;;               bits-per-sample, bitrate, channel-layout.  Guarded by codec
 ;;               slot to prevent infinite redraw loop.
 ;;             • Lyrics rendering — FIXED HEIGHT of
-;;               (context-before + 1 + context-after + 2) lines, always.
-;;               Missing lines above/below are padded with blank lines so the
-;;               waveform never moves.
+;;               emms-lyrics-sync-display-lyrics-height physical lines, always.
+;;               Past and future lines are selected by accumulating PHYSICAL
+;;               row counts (via count-wrapped-lines) until per-section budgets
+;;               are exhausted.  A line that would overflow the remaining
+;;               budget is not added; the remainder is padded with blank lines.
+;;               This guarantees the waveform position never moves.
 ;;               Current line: color only (no bold), amber #ffcb6b.
 ;;               Long lines are word-wrapped with equal left/right margins.
 ;;               When current line wraps to cur-height physical lines,
@@ -149,23 +152,20 @@ file-path, or track already has codec set (avoid re-running per track)."
                                          (aref strs 0)))
                             (fmt    (cdr (assq 'format  obj))))
                        (when audio
-                         ;; codec
                          (let ((cn (cdr (assq 'codec_name audio))))
                            (when (stringp cn)
                              (setf (emms-lyrics-sync-track-codec track)
                                    (upcase cn))))
-                         ;; sample rate
                          (let ((sr (cdr (assq 'sample_rate audio))))
                            (when (stringp sr)
                              (setf (emms-lyrics-sync-track-sample-rate track)
                                    (string-to-number sr))))
-                         ;; bits per sample
                          (let* ((b (cdr (assq 'bits_per_raw_sample audio)))
                                 (n (if (stringp b) (string-to-number b)
                                      (or b 0))))
                            (when (> n 0)
-                             (setf (emms-lyrics-sync-track-bits-per-sample track) n)))
-                         ;; bitrate: stream first, format fallback
+                             (setf (emms-lyrics-sync-track-bits-per-sample
+                                    track) n)))
                          (let* ((raw (or (cdr (assq 'bit_rate audio))
                                          (and fmt (cdr (assq 'bit_rate fmt)))))
                                 (n   (if (stringp raw) (string-to-number raw)
@@ -173,7 +173,6 @@ file-path, or track already has codec set (avoid re-running per track)."
                            (when (> n 0)
                              (setf (emms-lyrics-sync-track-bitrate track)
                                    (round (/ n 1000.0)))))
-                         ;; channels
                          (let ((layout (cdr (assq 'channel_layout audio)))
                                (count  (cdr (assq 'channels audio))))
                            (cond
@@ -188,8 +187,7 @@ file-path, or track already has codec set (avoid re-running per track)."
 ;;; ── Header Rendering ─────────────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--sr-string (hz)
-  "Format sample-rate HZ as \"44.1\" or \"48\" kHz for the tech line.
-44100 → \"44.1\"   48000 → \"48\"   88200 → \"88.2\"   96000 → \"96\""
+  "Format sample-rate HZ as \"44.1\" or \"48\" kHz for the tech line."
   (when (and (integerp hz) (> hz 0))
     (let* ((khz (/ hz 1000))
            (rem (% hz 1000)))
@@ -199,19 +197,19 @@ file-path, or track already has codec set (avoid re-running per track)."
 
 (defun emms-lyrics-sync-display--render-header (track elapsed-s)
   "Insert the metadata header for TRACK at point.
-Returns (elapsed-buf-start . elapsed-buf-end).
+Returns (elapsed-buf-start . elapsed-buf-end) — exact buffer positions
+of the elapsed text for marker-based incremental updates, or nil if
+the elapsed line was not inserted.
 
-Layout (foobar2000 style, each line independently centered):
-  Line 1: Artist[ - Composer]                        artist-face
-  Line 2: Album          (omitted when absent)       album-face
-  Line 3: [Track. ]Title                             title-face
-  Line 4: CODEC | bits/kHz | kbps | channels         tech-face
-           (omitted entirely when all fields nil)
-  Line 5: elapsed / duration                         elapsed/tech-face
+Header layout:
+  Line 1: Artist[ - Composer]             ← always
+  Line 2: Album                           ← omitted when absent
+  Line 3: [Track. ]Title                  ← always
+  Line 4: CODEC | bits/kHz | kbps | ch   ← omitted when all fields nil
+  Line 5: elapsed / duration              ← always
 
-Face design note: NO :weight bold or :height on any face used here.
-Both properties scale character pixel width in GUI Emacs, breaking
-string-width–based centering.  Colour alone provides visual hierarchy."
+All lines centered independently using string-width (no :height/:weight
+faces so character width equals string-width in all cases)."
   (let* ((artist   (emms-lyrics-sync-track-artist          track))
          (composer (emms-lyrics-sync-track-composer         track))
          (album    (emms-lyrics-sync-track-album            track))
@@ -223,220 +221,277 @@ string-width–based centering.  Colour alone provides visual hierarchy."
          (kbps     (emms-lyrics-sync-track-bitrate          track))
          (ch       (emms-lyrics-sync-track-channels         track))
          (dur      (emms-lyrics-sync-track-duration         track))
-         (sr-s     (emms-lyrics-sync-display--sr-string sr))
-         ;; ── Line 1: Artist[ - Composer] ──────────────────────────────────
+         ;; Line 1: Artist[ - Composer]
          (l1 (concat (or artist "Unknown Artist")
-                     (if composer (concat " - " composer) "")))
-         ;; ── Line 2: Album (nil → skip line entirely) ─────────────────────
-         (l2 (and (stringp album) (not (string-empty-p album)) album))
-         ;; ── Line 3: [Track. ]Title ────────────────────────────────────────
-         (l3 (concat (if (and trknum (not (string-empty-p trknum)))
-                         (format "%s. " trknum) "")
+                     (if (and composer (not (string-empty-p composer)))
+                         (concat " - " composer)
+                       "")))
+         ;; Line 2: Album (nil → skip entirely)
+         (l2 (when (and album (not (string-empty-p album))) album))
+         ;; Line 3: [Track. ]Title
+         (l3 (concat (if trknum (format "%s. " trknum) "")
                      (or title "Unknown Title")))
-         ;; ── Line 4: tech fields (nil when all absent) ────────────────────
+         ;; Line 4: tech fields (nil → skip entirely)
+         (sr-s   (emms-lyrics-sync-display--sr-string sr))
          (bps/sr (cond ((and bps sr-s) (format "%d/%s" bps sr-s))
-                       (sr-s sr-s)
-                       (t nil)))
-         (kbps-s (when (and (integerp kbps) (> kbps 0))
-                   (format "%d kbps" kbps)))
-         (l4-parts (delq nil (list codec bps/sr kbps-s ch)))
-         (l4 (and l4-parts (mapconcat #'identity l4-parts " | ")))
-         ;; ── Line 5: elapsed / duration ────────────────────────────────────
+                       (sr-s           sr-s)
+                       (t              nil)))
+         (kbps-s (when (and kbps (> kbps 0)) (format "%d kbps" kbps)))
+         (l4     (let ((parts (delq nil (list codec bps/sr kbps-s ch))))
+                   (when parts (mapconcat #'identity parts " | "))))
+         ;; Line 5: elapsed / duration — split for marker recording
          (elapsed-str (emms-lyrics-sync-display--format-time elapsed-s))
          (dur-str     (emms-lyrics-sync-display--format-time dur))
          (l5-suffix   (concat " / " dur-str))
-         ;; Compute left pad for line 5 independently (for marker placement)
-         (l5-full     (concat elapsed-str l5-suffix))
-         (l5-pad      (max 0 (/ (- (emms-lyrics-sync-display--body-width)
-                                    (string-width l5-full))
-                                 2)))
          elapsed-start elapsed-end)
-    ;; ── Insert line 1 ────────────────────────────────────────────────────────
+    ;; ── Insert lines ─────────────────────────────────────────────────────────
     (insert (propertize (emms-lyrics-sync-display--center l1)
                         'face 'emms-lyrics-sync-artist-face) "\n")
-    ;; ── Insert line 2 (album) — only when present ────────────────────────────
     (when l2
       (insert (propertize (emms-lyrics-sync-display--center l2)
                           'face 'emms-lyrics-sync-album-face) "\n"))
-    ;; ── Insert line 3 (title) ────────────────────────────────────────────────
     (insert (propertize (emms-lyrics-sync-display--center l3)
                         'face 'emms-lyrics-sync-title-face) "\n")
-    ;; ── Insert line 4 (tech) — only when at least one field present ──────────
     (when l4
       (insert (propertize (emms-lyrics-sync-display--center l4)
                           'face 'emms-lyrics-sync-tech-face) "\n"))
-    ;; ── Insert line 5 (elapsed / duration) in two parts ─────────────────────
-    ;; Inserting in two parts lets us record (point) directly before and after
-    ;; the elapsed text — no fragile string-search needed.
-    (insert (propertize (make-string l5-pad ?\s)
-                        'face 'emms-lyrics-sync-tech-face))
-    (setq elapsed-start (point))
-    (insert (propertize elapsed-str 'face 'emms-lyrics-sync-elapsed-face))
-    (setq elapsed-end (point))
-    (insert (propertize l5-suffix 'face 'emms-lyrics-sync-tech-face))
+    ;; Line 5: insert in two halves, recording elapsed position via (point)
+    (let* ((l5-full  (concat elapsed-str l5-suffix))
+           (pad      (max 0 (/ (- (emms-lyrics-sync-display--body-width)
+                                   (string-width l5-full))
+                                2))))
+      (insert (propertize (make-string pad ?\s) 'face 'emms-lyrics-sync-tech-face))
+      (setq elapsed-start (point))
+      (insert (propertize elapsed-str 'face 'emms-lyrics-sync-elapsed-face))
+      (setq elapsed-end (point))
+      (insert (propertize l5-suffix   'face 'emms-lyrics-sync-tech-face)))
     (insert "\n")
     (cons elapsed-start elapsed-end)))
 
-;;; ── Lyrics Rendering ─────────────────────────────────────────────────────────
-
-(defun emms-lyrics-sync-display--wrap-and-center (text face)
-  "Insert TEXT with FACE, word-wrapped and centered, at point.
-Each physical line is independently centered.
-Returns the number of physical lines inserted."
-  (let* ((width  (emms-lyrics-sync-display--body-width))
-         (words  (split-string (string-trim text) "[ \t]+" t))
-         lines current-words current-w)
-    ;; Greedy word-wrap
-    (dolist (word words)
-      (let ((w (string-width word)))
-        (if (null current-words)
-            (setq current-words (list word) current-w w)
-          (if (> (+ current-w 1 w) width)
-              (progn
-                (push (nreverse current-words) lines)
-                (setq current-words (list word) current-w w))
-            (push word current-words)
-            (setq current-w (+ current-w 1 w))))))
-    (when current-words
-      (push (nreverse current-words) lines))
-    (let ((result (nreverse lines))
-          (count  0))
-      (dolist (line-words result)
-        (let* ((line-str (mapconcat #'identity line-words " "))
-               (pad      (max 0 (/ (- width (string-width line-str)) 2))))
-          (insert (make-string pad ?\s))
-          (insert (propertize line-str 'face face))
-          (insert "\n")
-          (setq count (1+ count))))
-      (max 1 count))))
+;;; ── Lyrics: Wrapping Helper ──────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--count-wrapped-lines (text)
-  "Return the number of physical lines TEXT wraps to at current body width.
-Uses the same greedy word-wrap algorithm as `wrap-and-center'."
-  (let* ((width  (emms-lyrics-sync-display--body-width))
-         (words  (split-string (string-trim text) "[ \t]+" t))
-         (line-w 0)
-         (count  1))
-    (dolist (word words)
-      (let ((w (string-width word)))
-        (if (zerop line-w)
-            (setq line-w w)
-          (if (> (+ line-w 1 w) width)
-              (setq count  (1+ count)
-                    line-w w)
-            (setq line-w (+ line-w 1 w))))))
-    (max 1 count)))
+  "Return the number of physical screen lines TEXT occupies after word-wrap.
+Uses the current window body width.  Never returns less than 1."
+  (if (or (null text) (string-empty-p text))
+      1
+    (let* ((width  (emms-lyrics-sync-display--body-width))
+           (words  (split-string text))
+           (count  1)
+           (used   0))
+      (dolist (w words)
+        (let ((wlen (1+ (string-width w)))) ; +1 for space
+          (if (> (+ used wlen) width)
+              (setq count (1+ count)
+                    used  (string-width w))
+            (setq used (+ used wlen)))))
+      count)))
 
-(defun emms-lyrics-sync-display--render-plain-line (line face)
-  "Insert LINE text with FACE, word-wrapped and centered."
-  (emms-lyrics-sync-display--wrap-and-center
-   (emms-lyrics-sync-line-text line) face))
+(defun emms-lyrics-sync-display--wrap-and-insert (text face)
+  "Insert TEXT with FACE, word-wrapped and centered within body width."
+  (if (or (null text) (string-empty-p (string-trim text)))
+      (insert "\n")
+    (let* ((width  (emms-lyrics-sync-display--body-width))
+           (words  (split-string text))
+           lines current-line current-width)
+      ;; Greedy word-wrap
+      (dolist (w words)
+        (let ((wlen (string-width w)))
+          (if (null current-line)
+              (setq current-line (list w)
+                    current-width wlen)
+            (if (<= (+ current-width 1 wlen) width)
+                (setq current-line  (append current-line (list w))
+                      current-width (+ current-width 1 wlen))
+              (push current-line lines)
+              (setq current-line  (list w)
+                    current-width wlen)))))
+      (when current-line (push current-line lines))
+      (setq lines (nreverse lines))
+      ;; Insert each physical line, centered
+      (dolist (seg lines)
+        (let* ((seg-str (mapconcat #'identity seg " "))
+               (pad     (max 0 (/ (- width (string-width seg-str)) 2))))
+          (insert (make-string pad ?\s))
+          (insert (propertize seg-str 'face face))
+          (insert "\n"))))))
+
+;;; ── Lyrics: A2 Word-Level Render ─────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--render-a2-line (line)
-  "Insert A2 word-level LINE centered at point, recording word positions.
+  "Insert A2 word-level LINE at point, centered, recording word positions.
 Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
   (let* ((words     (emms-lyrics-sync-line-words line))
          (line-text (emms-lyrics-sync-line-text  line))
          (width     (emms-lyrics-sync-display--body-width))
-         (len       (string-width line-text))
+         (len       (string-width (or line-text "")))
          (pad       (max 0 (/ (- width len) 2)))
          positions)
     (insert (make-string pad ?\s))
     (dolist (word words)
       (let ((start (point)))
-        ;; Insert with current-line-face as base; overlays paint sung/current
+        ;; Insert with future-line-face as base; overlays paint sung/current
         (insert (propertize (emms-lyrics-sync-word-text word)
-                            'face 'emms-lyrics-sync-current-line-face))
+                            'face 'emms-lyrics-sync-future-line-face))
         (push (list start (point) word) positions)))
     (insert "\n")
     (vconcat (nreverse positions))))
 
+;;; ── Lyrics: Context Window with Fixed Physical Height ────────────────────────
+
 (defun emms-lyrics-sync-display--render-lyrics (doc pos-ms)
   "Insert the lyrics section for DOC at POS-MS.
 
-Total height is ALWAYS (n-before + n-after + 3) lines:
-  top-pad blank lines  (n-before - available past lines)
-  past lines           (up to n-before)
-  1 blank line
-  current line         (cur-height physical lines, 1 for A2)
-  1 blank line
-  future lines         (up to eff-n-after = n-after - (cur-height - 1))
-  bottom-pad blank lines
+Always occupies exactly `emms-lyrics-sync-display-lyrics-height' physical
+screen lines regardless of wrapping or playback position.
 
-When the current line wraps to cur-height > 1 physical lines, eff-n-after
-is reduced by (cur-height - 1) so the grand total stays constant."
+Algorithm (synced LRC normal case):
+  1. cur-height  = count-wrapped-lines(cur-text)  [≥1]
+  2. fut-budget  = n-after - (cur-height - 1)
+  3. past: walk BACKWARD from cur-idx-1, accumulate count-wrapped-lines;
+           stop when adding the next line would EXCEED the n-before budget.
+           → past-lines (forward order), past-phys (total physical rows)
+  4. future: walk FORWARD from cur-idx+1, accumulate count-wrapped-lines;
+             stop when adding the next line would EXCEED fut-budget.
+             → future-lines (forward order), future-phys
+  5. top-pad = n-before  - past-phys   (blank lines)
+  6. bot-pad = fut-budget - future-phys (blank lines)
+
+Total physical rows:
+  top-pad + past-phys + 1 (blank) + cur-height + 1 (blank)
+    + future-phys + bot-pad
+  = n-before + 1 + cur-height + 1 + (n-after - (cur-height-1))
+  = n-before + n-after + 3
+  = lyrics-height  ✓  (with default 3+6+3 = 12)
+
+Sets `emms-lyrics-sync-display--word-positions' when current line is A2."
   (setq emms-lyrics-sync-display--word-positions nil)
-  (let* ((n-bef        emms-lyrics-sync-display-context-before)
-         (n-aft        emms-lyrics-sync-display-context-after)
-         ;; Fixed total = n-bef + n-aft + 3 (2 blank + 1 current baseline)
-         (fixed-total  (+ n-bef n-aft 3)))
+  (let* ((n-bef  emms-lyrics-sync-display-context-before)
+         (n-aft  emms-lyrics-sync-display-context-after))
     (cond
-     ;; ── No lyrics ────────────────────────────────────────────────────────────
+     ;; ── No lyrics ──────────────────────────────────────────────────────────
      ((null doc)
-      (dotimes (_ fixed-total) (insert "\n")))
+      (let ((total emms-lyrics-sync-display-lyrics-height))
+        (dotimes (_ (/ total 2)) (insert "\n"))
+        (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
+                            'face 'emms-lyrics-sync-past-line-face) "\n")
+        (let ((remaining (- total (/ total 2) 1)))
+          (dotimes (_ (max 0 remaining)) (insert "\n")))))
 
-     ;; ── Plain (unsynced) text ─────────────────────────────────────────────────
+     ;; ── Plain (unsynced) text ───────────────────────────────────────────────
      ((emms-lyrics-sync-lrc-doc-plain-p doc)
-      (cl-loop for line across (emms-lyrics-sync-lrc-doc-lines doc) do
-        (emms-lyrics-sync-display--render-plain-line
-         line 'emms-lyrics-sync-future-line-face)))
+      (let ((lines (emms-lyrics-sync-lrc-doc-lines doc)))
+        (cl-loop for line across lines do
+          (emms-lyrics-sync-display--wrap-and-insert
+           (emms-lyrics-sync-line-text line)
+           'emms-lyrics-sync-future-line-face))))
 
-     ;; ── Synced LRC ───────────────────────────────────────────────────────────
+     ;; ── Synced LRC ─────────────────────────────────────────────────────────
      (t
       (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
              (n       (length lines))
              (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))
-        (if (< cur-idx 0)
-            ;; Before first timestamp — top pad + blank current slot + preview
-            (let* ((avail-fut (min n n-aft))
-                   (bot-pad   (- n-aft avail-fut)))
-              (dotimes (_ n-bef)        (insert "\n")) ; top pad
-              (insert "\n")                            ; blank before slot
-              (insert "\n")                            ; current slot (empty)
-              (insert "\n")                            ; blank after slot
-              (cl-loop for i from 0 below avail-fut do
-                (emms-lyrics-sync-display--render-plain-line
-                 (aref lines i) 'emms-lyrics-sync-future-line-face))
-              (dotimes (_ (max 0 bot-pad)) (insert "\n")))
 
-          ;; Normal case — compute wrapped height first, then slice
+        (if (< cur-idx 0)
+            ;; ── Before first timestamp ──────────────────────────────────────
+            ;; Show as many future lines as fit within lyrics-height physical
+            ;; rows (contiguous from index 0), top-padding the rest.
+            (let ((future-lines nil)
+                  (phys-total   0)
+                  (budget       emms-lyrics-sync-display-lyrics-height))
+              (cl-loop for i from 0 below n
+                       for line  = (aref lines i)
+                       for lphys = (emms-lyrics-sync-display--count-wrapped-lines
+                                    (emms-lyrics-sync-line-text line))
+                       while (and (> budget 0) (<= lphys budget))
+                       do (push line future-lines)
+                          (cl-decf budget lphys)
+                          (cl-incf phys-total lphys))
+              (let ((top-pad (max 0 (- emms-lyrics-sync-display-lyrics-height
+                                       phys-total))))
+                (dotimes (_ top-pad) (insert "\n"))
+                (dolist (line (nreverse future-lines))
+                  (emms-lyrics-sync-display--wrap-and-insert
+                   (emms-lyrics-sync-line-text line)
+                   'emms-lyrics-sync-future-line-face))))
+
+          ;; ── Normal: render fixed-height context window ───────────────────
           (let* ((cur-line   (aref lines cur-idx))
-                 (a2-p       (not (null (emms-lyrics-sync-line-words cur-line))))
-                 ;; A2 lines are never wrapped (word-level render)
-                 (cur-height (if a2-p 1
+                 (cur-text   (emms-lyrics-sync-line-text cur-line))
+                 ;; A2 lines always render on exactly 1 physical row
+                 (cur-height (if (emms-lyrics-sync-line-words cur-line)
+                                 1
                                (emms-lyrics-sync-display--count-wrapped-lines
-                                (emms-lyrics-sync-line-text cur-line))))
-                 ;; Reduce n-after by extra lines the current lyric occupies
-                 (eff-n-aft  (max 0 (- n-aft (1- cur-height))))
-                 (start      (max 0      (- cur-idx n-bef)))
-                 (end        (min (1- n) (+ cur-idx eff-n-aft)))
-                 (avail-past (- cur-idx start))
-                 (avail-fut  (- end cur-idx))
-                 (top-pad    (- n-bef avail-past))
-                 (bot-pad    (- eff-n-aft avail-fut)))
-            ;; Top padding — blank lines when near track start
-            (dotimes (_ (max 0 top-pad)) (insert "\n"))
-            ;; Past lines
-            (cl-loop for i from start below cur-idx do
-              (emms-lyrics-sync-display--render-plain-line
-               (aref lines i) 'emms-lyrics-sync-past-line-face))
-            ;; Blank separator before current line
+                                cur-text)))
+                 ;; fut-budget shrinks when current line is taller than 1 row
+                 (fut-budget (max 0 (- n-aft (- cur-height 1))))
+
+                 ;; ── Collect past lines (physical-row budget) ──────────────
+                 ;; Walk BACKWARD; stop when next line would exceed budget.
+                 ;; Result is in forward (display) order because push+downfrom
+                 ;; reverses the backward walk.
+                 (past-phys 0)
+                 (past-lines
+                  (let (acc (budget n-bef))
+                    (cl-loop for i downfrom (1- cur-idx) to 0
+                             for line  = (aref lines i)
+                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines
+                                          (emms-lyrics-sync-line-text line))
+                             while (and (> budget 0) (<= lphys budget))
+                             do (push line acc)
+                                (cl-decf budget lphys)
+                                (cl-incf past-phys lphys))
+                    acc))  ; forward order (push+downfrom reversal)
+
+                 (top-pad (max 0 (- n-bef past-phys)))
+
+                 ;; ── Collect future lines (physical-row budget) ────────────
+                 ;; Walk FORWARD; stop when next line would exceed fut-budget.
+                 (future-phys 0)
+                 (future-lines
+                  (let (acc (budget fut-budget))
+                    (cl-loop for i from (1+ cur-idx) below n
+                             for line  = (aref lines i)
+                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines
+                                          (emms-lyrics-sync-line-text line))
+                             while (and (> budget 0) (<= lphys budget))
+                             do (push line acc)
+                                (cl-decf budget lphys)
+                                (cl-incf future-phys lphys))
+                    (nreverse acc)))
+
+                 (bot-pad (max 0 (- fut-budget future-phys))))
+
+            ;; Top padding (fills unused past rows)
+            (dotimes (_ top-pad) (insert "\n"))
+
+            ;; Past lines (oldest → newest, each via wrap-and-insert)
+            (dolist (line past-lines)
+              (emms-lyrics-sync-display--wrap-and-insert
+               (emms-lyrics-sync-line-text line)
+               'emms-lyrics-sync-past-line-face))
+
+            ;; Blank separator before current
             (insert "\n")
-            ;; Current line
-            (if a2-p
+
+            ;; Current line (A2 or plain)
+            (if (emms-lyrics-sync-line-words cur-line)
                 (setq emms-lyrics-sync-display--word-positions
                       (emms-lyrics-sync-display--render-a2-line cur-line))
-              (emms-lyrics-sync-display--wrap-and-center
-               (emms-lyrics-sync-line-text cur-line)
-               'emms-lyrics-sync-current-line-face))
-            ;; Blank separator after current line
+              (emms-lyrics-sync-display--wrap-and-insert
+               cur-text 'emms-lyrics-sync-current-line-face))
+
+            ;; Blank separator after current
             (insert "\n")
+
             ;; Future lines
-            (cl-loop for i from (1+ cur-idx) to end do
-              (emms-lyrics-sync-display--render-plain-line
-               (aref lines i) 'emms-lyrics-sync-future-line-face))
-            ;; Bottom padding
-            (dotimes (_ (max 0 bot-pad)) (insert "\n")))))))))
+            (dolist (line future-lines)
+              (emms-lyrics-sync-display--wrap-and-insert
+               (emms-lyrics-sync-line-text line)
+               'emms-lyrics-sync-future-line-face))
+
+            ;; Bottom padding (fills unused future rows)
+            (dotimes (_ bot-pad) (insert "\n")))))))))
 
 ;;; ── Overlay Management ───────────────────────────────────────────────────────
 
@@ -451,71 +506,65 @@ is reduced by (cur-height - 1) so the grand total stays constant."
   emms-lyrics-sync-display--word-overlay)
 
 (defun emms-lyrics-sync-display--clear-sung-overlays ()
-  "Delete all sung-word overlays from `emms-lyrics-sync-display--sung-overlays'."
+  "Delete all sung-word overlays."
   (mapc #'delete-overlay emms-lyrics-sync-display--sung-overlays)
   (setq emms-lyrics-sync-display--sung-overlays nil))
 
 (defun emms-lyrics-sync-display--update-word-overlays (pos-ms)
-  "Reposition current-word overlay and paint sung-word overlays for POS-MS."
+  "Reposition current-word and sung-word overlays for POS-MS."
   (when (and emms-lyrics-sync-display--word-positions
              (buffer-live-p emms-lyrics-sync-display--buffer))
     (with-current-buffer emms-lyrics-sync-display--buffer
       (let ((ov           (emms-lyrics-sync-display--ensure-word-overlay))
             (found-cursor nil))
         (emms-lyrics-sync-display--clear-sung-overlays)
-        (cl-loop for triple across emms-lyrics-sync-display--word-positions
-                 for buf-start = (nth 0 triple)
-                 for buf-end   = (nth 1 triple)
-                 for word      = (nth 2 triple)
-                 for w-start   = (emms-lyrics-sync-word-start-ms word)
-                 for w-end     = (or (emms-lyrics-sync-word-end-ms word)
-                                     most-positive-fixnum)
-                 do
-                 (cond
-                  ;; Currently active word
-                  ((and (>= pos-ms w-start) (< pos-ms w-end)
-                        (not found-cursor))
-                   (setq found-cursor t)
-                   (move-overlay ov buf-start buf-end
-                                 emms-lyrics-sync-display--buffer))
-                  ;; Already sung
-                  ((< w-end pos-ms)
-                   (let ((sung (make-overlay buf-start buf-end
-                                            emms-lyrics-sync-display--buffer)))
-                     (overlay-put sung 'face
-                                  'emms-lyrics-sync-word-sung-face)
-                     (overlay-put sung 'priority 9)
-                     (push sung
-                           emms-lyrics-sync-display--sung-overlays)))))))))
+        (cl-loop
+         for triple across emms-lyrics-sync-display--word-positions
+         for buf-start = (nth 0 triple)
+         for buf-end   = (nth 1 triple)
+         for word      = (nth 2 triple)
+         for w-start   = (emms-lyrics-sync-word-start-ms word)
+         for w-end     = (or (emms-lyrics-sync-word-end-ms word)
+                             most-positive-fixnum)
+         do
+         (cond
+          ((and (>= pos-ms w-start) (< pos-ms w-end) (not found-cursor))
+           (setq found-cursor t)
+           (move-overlay ov buf-start buf-end
+                         emms-lyrics-sync-display--buffer))
+          ((< w-end pos-ms)
+           (let ((sung (make-overlay buf-start buf-end
+                                    emms-lyrics-sync-display--buffer)))
+             (overlay-put sung 'face 'emms-lyrics-sync-word-sung-face)
+             (overlay-put sung 'priority 9)
+             (push sung emms-lyrics-sync-display--sung-overlays)))))))))
 
 ;;; ── Elapsed Time Incremental Update ─────────────────────────────────────────
-;;
-;; Marker invariant (set in full-redraw via copy-marker):
-;;   elapsed-marker      — insertion-type NIL: stays at start of elapsed text.
-;;   elapsed-end-marker  — insertion-type T:   advances past inserted content.
-;;
-;; After delete-region both markers collapse to start.
-;; After insert, end-marker (T) advances to end of new text.
-;; Next call deletes exactly the previous elapsed text.
 
 (defun emms-lyrics-sync-display--update-elapsed (elapsed-s)
-  "Replace only the elapsed-time text in the header for ELAPSED-S seconds."
+  "Replace only the elapsed-time text in the header for ELAPSED-S seconds.
+Marker invariant:
+  elapsed-marker     NIL-type → stays at start of elapsed text.
+  elapsed-end-marker T-type   → advances past newly inserted text.
+After delete-region both markers are at the same point; after insert the
+end-marker advances to the new end — next call deletes exactly the right span."
   (when (and (markerp emms-lyrics-sync-display--elapsed-marker)
              (marker-buffer emms-lyrics-sync-display--elapsed-marker)
              (markerp emms-lyrics-sync-display--elapsed-end-marker)
+             (marker-buffer emms-lyrics-sync-display--elapsed-end-marker)
              (buffer-live-p emms-lyrics-sync-display--buffer))
     (with-current-buffer emms-lyrics-sync-display--buffer
       (let ((inhibit-read-only t)
             (new-str (emms-lyrics-sync-display--format-time elapsed-s)))
         (save-excursion
-          (let ((start (marker-position
-                        emms-lyrics-sync-display--elapsed-marker))
-                (end   (marker-position
-                        emms-lyrics-sync-display--elapsed-end-marker)))
-            (goto-char start)
-            (delete-region start end)
-            (insert (propertize new-str
-                                'face 'emms-lyrics-sync-elapsed-face))))))))
+          (let ((start (marker-position emms-lyrics-sync-display--elapsed-marker))
+                (end   (marker-position emms-lyrics-sync-display--elapsed-end-marker)))
+            ;; Guard: both positions must be valid numbers
+            (when (and (integerp start) (integerp end) (<= start end))
+              (goto-char start)
+              (delete-region start end)
+              (insert (propertize new-str
+                                  'face 'emms-lyrics-sync-elapsed-face)))))))))
 
 (provide 'emms-lyrics-sync-display-render)
 ;;; emms-lyrics-sync-display-render.el ends here

@@ -1,6 +1,6 @@
 ;;; emms-lyrics-sync-display-redraw.el --- Full and partial buffer redraw  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-display-redraw.el
-;; Created : 2026-06-13 04:25 UTC
+;; Created : 2026-06-13 05:35 UTC
 ;; Purpose : Buffer redraw orchestration for the emms-lyrics-sync display
 ;;           subsystem.  Provides four functions called by display.el:
 ;;
@@ -105,12 +105,10 @@ insertion-type NIL, then inserts bar content."
          (render-data
           (if (vectorp data)
               data
-            ;; Placeholder: neutral 0.5 amplitude both channels
             (let ((v (make-vector win-chars nil)))
               (dotimes (i win-chars) (aset v i (vector 0.5 0.5)))
               v))))
     (insert "\n")
-    ;; NIL insertion-type: marker stays here even when content inserted at point
     (setq emms-lyrics-sync-display--waveform-marker
           (copy-marker (point) nil))
     (cond
@@ -129,12 +127,7 @@ insertion-type NIL, then inserts bar content."
 ;;; ── Waveform: Cursor Update ──────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--update-waveform-cursor (pos-ms)
-  "Replace only the waveform bar with an updated playback cursor at POS-MS.
-
-No-op when:
-  - Display buffer is not live
-  - waveform-marker is invalid
-  - No real extracted data is cached"
+  "Replace only the waveform bar with an updated playback cursor at POS-MS."
   (when (and (buffer-live-p emms-lyrics-sync-display--buffer)
              (markerp emms-lyrics-sync-display--waveform-marker)
              (marker-buffer emms-lyrics-sync-display--waveform-marker))
@@ -157,20 +150,23 @@ No-op when:
                                    emms-lyrics-sync-waveform-height 2)
                                char-h))
                  (pos-s     (/ (float pos-ms) 1000.0)))
-            (delete-region wf-start (point-max))
-            (goto-char wf-start)
-            (cond
-             ((and (fboundp 'emms-lyrics-sync-waveform--use-svg-p)
-                   (emms-lyrics-sync-waveform--use-svg-p)
-                   (fboundp 'emms-lyrics-sync-waveform--render-svg))
-              (let ((img (emms-lyrics-sync-waveform--render-svg
-                          data px-w px-h pos-s duration)))
-                (when img (insert-image img)))
-              (insert "\n"))
-             ((fboundp 'emms-lyrics-sync-waveform--render-unicode)
-              (insert (emms-lyrics-sync-waveform--render-unicode
-                       data win-chars pos-s duration))
-              (insert "\n")))))))))
+            ;; Guard: wf-start must be a valid buffer position
+            (when (and (integerp wf-start)
+                       (<= wf-start (point-max)))
+              (delete-region wf-start (point-max))
+              (goto-char wf-start)
+              (cond
+               ((and (fboundp 'emms-lyrics-sync-waveform--use-svg-p)
+                     (emms-lyrics-sync-waveform--use-svg-p)
+                     (fboundp 'emms-lyrics-sync-waveform--render-svg))
+                (let ((img (emms-lyrics-sync-waveform--render-svg
+                            data px-w px-h pos-s duration)))
+                  (when img (insert-image img)))
+                (insert "\n"))
+               ((fboundp 'emms-lyrics-sync-waveform--render-unicode)
+                (insert (emms-lyrics-sync-waveform--render-unicode
+                         data win-chars pos-s duration))
+                (insert "\n"))))))))))
 
 ;;; ── Full Buffer Redraw ───────────────────────────────────────────────────────
 
@@ -205,22 +201,20 @@ No-op when:
         (when track
           (let ((erange (emms-lyrics-sync-display--render-header
                          track (/ pos-ms 1000.0))))
-            (when (car erange)
-              ;; elapsed-marker: NIL type — stays at start of elapsed text
-              (setq emms-lyrics-sync-display--elapsed-marker
-                    (copy-marker (car erange) nil))
-              ;; elapsed-end-marker: T type — advances past inserted content
-              ;; MUST be T: if NIL, delete-region deletes nothing on update
-              ;; and elapsed text accumulates ("0:260:250:250:...").
-              (setq emms-lyrics-sync-display--elapsed-end-marker
-                    (copy-marker (cdr erange) t)))))
+            ;; elapsed-marker: NIL type — stays at start of elapsed text
+            ;; elapsed-end-marker: T type — advances past inserted text
+            ;; CRITICAL: end-marker MUST be T or elapsed accumulates
+            (setq emms-lyrics-sync-display--elapsed-marker
+                  (copy-marker (car erange) nil)
+                  emms-lyrics-sync-display--elapsed-end-marker
+                  (copy-marker (cdr erange) t))))
         (insert "\n")
 
-        ;; ── Lyrics marker (NIL type) ──────────────────────────────────────
+        ;; ── Lyrics marker (NIL type — never advances) ─────────────────────
         (setq emms-lyrics-sync-display--lyrics-marker
               (copy-marker (point) nil))
 
-        ;; ── Lyrics (fixed height) ─────────────────────────────────────────
+        ;; ── Lyrics ────────────────────────────────────────────────────────
         (emms-lyrics-sync-display--render-lyrics doc pos-ms)
 
         ;; ── Waveform ──────────────────────────────────────────────────────
@@ -242,16 +236,16 @@ No-op when:
              (marker-buffer emms-lyrics-sync-display--lyrics-marker)
              (buffer-live-p emms-lyrics-sync-display--buffer))
     (with-current-buffer emms-lyrics-sync-display--buffer
-      (let ((inhibit-read-only t))
-        (emms-lyrics-sync-display--clear-sung-overlays)
-        (setq emms-lyrics-sync-display--word-positions nil)
-        (delete-region
-         (marker-position emms-lyrics-sync-display--lyrics-marker)
-         (point-max))
-        (goto-char
-         (marker-position emms-lyrics-sync-display--lyrics-marker))
-        (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-        (emms-lyrics-sync-display--render-waveform-cached pos-ms)))))
+      (let* ((inhibit-read-only t)
+             (lm-pos (marker-position emms-lyrics-sync-display--lyrics-marker)))
+        ;; Guard: marker position must be valid
+        (when (and (integerp lm-pos) (<= lm-pos (point-max)))
+          (emms-lyrics-sync-display--clear-sung-overlays)
+          (setq emms-lyrics-sync-display--word-positions nil)
+          (delete-region lm-pos (point-max))
+          (goto-char lm-pos)
+          (emms-lyrics-sync-display--render-lyrics doc pos-ms)
+          (emms-lyrics-sync-display--render-waveform-cached pos-ms))))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here
