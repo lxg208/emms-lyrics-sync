@@ -1,35 +1,19 @@
 ;;; emms-lyrics-sync-display-vars.el --- Customization, faces, state variables and utilities  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-display-vars.el
 ;; Created : 2026-06-13 05:35 UTC
-;; Purpose : Shared definitions for the emms-lyrics-sync display subsystem.
-;;           Declares all defcustom options, defface faces, and defvar state
-;;           variables used across the display subsystem.  Also provides four
-;;           small stateless utility functions (time formatting, window lookup,
-;;           body-width, text centering) required by all sibling modules.
+;; Updated : 2026-06-13 19:50 UTC
+;; Changes : Bug 1 color fix — tech-face and new duration-face are now
+;;           distinct from past-line-face (font-lock-comment-face grey).
 ;;
-;;           Face design notes:
-;;             • Header faces (artist, album, title) use colour only — no
-;;               :weight bold or :height scaling.  Scaling changes character
-;;               pixel width, which breaks string-width–based centering in
-;;               GUI Emacs.  Colour provides sufficient visual hierarchy.
-;;             • Current-line face uses #ffcb6b (warm amber) instead of bold.
-;;             • A2 karaoke faces: sung words = #c3e88d (sage green),
-;;               current word = #ffdd00 (yellow) with underline.
-;;               Progression: grey past → green sung → yellow current → white future.
+;;           Old: both used font-lock-comment-face → same grey as past lyrics
+;;           New:
+;;             tech-face     → #4db6ac  Material Teal 300
+;;                             reads as "cool/technical metadata"
+;;             duration-face → #80cbc4  Material Teal 200 (lighter)
+;;                             complements tech-face and the teal elapsed face
 ;;
 ;; Copyright (C) 2026  emms-lyrics-sync contributors
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;;
-;; Author  : lxg208
-;; URL     : https://github.com/lxg208/emms-lyrics-sync
-
-;;; Commentary:
-;;
-;; Load order within the display subsystem:
-;;   1. emms-lyrics-sync-display-vars.el   ← this file
-;;   2. emms-lyrics-sync-display-render.el ← all buffer-insert render fns
-;;   3. emms-lyrics-sync-display-redraw.el ← redraw orchestration
-;;   4. emms-lyrics-sync-display.el        ← timer, hooks (entry point)
 
 ;;; Code:
 
@@ -85,11 +69,7 @@
 The lyrics section always occupies exactly this many lines regardless of
 line wrapping or playback position.  The value should satisfy:
   context-before + context-after + 3 = lyrics-height
-with the default values 3 + 6 + 3 = 12.
-
-Increase on larger displays or when using a smaller font.  The value
-can be changed at any time with setq; it takes effect on the next
-full redraw (track change)."
+with the default values 3 + 6 + 3 = 12."
   :type  'integer
   :group 'emms-lyrics-sync)
 
@@ -100,10 +80,9 @@ full redraw (track change)."
 
 ;;; ── Faces ────────────────────────────────────────────────────────────────────
 ;;
-;; IMPORTANT: Do NOT add :weight bold or :height to any face used in
-;; header lines that are centered via string-width.  Both properties
-;; scale character pixel width in GUI Emacs, causing the text to render
-;; wider than string-width reports, which shifts text right of centre.
+;; IMPORTANT: Do NOT add :weight bold or :height to faces used in header
+;; lines centered via string-width.  Both scale character pixel width in
+;; GUI Emacs, causing text to render wider than string-width reports.
 ;; Use colour alone for visual emphasis.
 
 (defface emms-lyrics-sync-artist-face
@@ -122,13 +101,24 @@ full redraw (track change)."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-tech-face
-  '((t :inherit font-lock-comment-face))
-  "Face for the CODEC | bits/kHz | kbps | channels info line (line 4)."
+  '((((background dark))  :foreground "#4db6ac")
+    (((background light)) :foreground "#00796b"))
+  "Face for the CODEC | bits/kHz | kbps | channels info line (line 4).
+Material Teal 300 — clearly distinct from past-line-face (comment grey),
+reads as cool/technical metadata without competing with the amber current line."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-elapsed-face
   '((t :inherit font-lock-constant-face))
-  "Face for the elapsed-time portion of the time line (line 5)."
+  "Face for the elapsed-time portion of the time line (e.g. \"0:18\")."
+  :group 'emms-lyrics-sync)
+
+(defface emms-lyrics-sync-duration-face
+  '((((background dark))  :foreground "#80cbc4")
+    (((background light)) :foreground "#00897b"))
+  "Face for the duration portion of the time line (e.g. \"/ 4:55\").
+Material Teal 200 — lighter than tech-face, complements the teal elapsed
+face while remaining clearly distinct from the grey past-line-face."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-past-line-face
@@ -140,8 +130,7 @@ full redraw (track change)."
   '((((background dark))  :foreground "#ffcb6b")
     (((background light)) :foreground "#b36a00"))
   "Face for the currently playing lyrics line.
-Uses warm amber (#ffcb6b) instead of bold weight so that character width
-stays uniform and string-width–based centering remains accurate."
+Warm amber — no bold weight so string-width centering stays accurate."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-future-line-face
@@ -152,16 +141,13 @@ stays uniform and string-width–based centering remains accurate."
 (defface emms-lyrics-sync-word-sung-face
   '((((background dark))  :foreground "#c3e88d")
     (((background light)) :foreground "#2d7a2d"))
-  "Face for already-sung words within the current A2 karaoke line.
-Sage green (#c3e88d) creates the progression: grey past → green sung
-→ yellow current → white future."
+  "Face for already-sung words within the current A2 karaoke line."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-word-current-face
   '((((background dark))  :foreground "#ffdd00" :underline t)
     (((background light)) :foreground "#cc6600" :underline t))
-  "Face for the word currently being sung (A2 karaoke highlight).
-Yellow (#ffdd00) with underline marks the active word clearly."
+  "Face for the word currently being sung (A2 karaoke highlight)."
   :group 'emms-lyrics-sync)
 
 ;;; ── Internal State ───────────────────────────────────────────────────────────
@@ -173,7 +159,7 @@ Yellow (#ffdd00) with underline marks the active word clearly."
   "The 100ms display-update timer.")
 
 (defvar emms-lyrics-sync-display--last-line-idx -1
-  "Line index last used for a lyrics redraw; gates context-window advances.")
+  "Line index last used for a lyrics redraw.")
 
 (defvar emms-lyrics-sync-display--word-overlay nil
   "Overlay used for A2 current-word highlighting.")
@@ -182,40 +168,25 @@ Yellow (#ffdd00) with underline marks the active word clearly."
   "List of overlays for already-sung words in the current A2 line.")
 
 (defvar emms-lyrics-sync-display--elapsed-marker nil
-  "Marker at the START of the elapsed-time text in the header.
-Must be created with insertion-type NIL so it stays at the start of the
-elapsed text regardless of insertions — used as the start of delete-region
-in `emms-lyrics-sync-display--update-elapsed'.")
+  "NIL-type marker at the START of the elapsed-time text in the header.")
 
 (defvar emms-lyrics-sync-display--elapsed-end-marker nil
-  "Marker at the END of the elapsed-time text in the header.
-Must be created with insertion-type T so it advances past newly inserted
-elapsed text — used as the end of delete-region in update-elapsed, and
-advances to mark the new end after each insert.")
+  "T-type marker at the END of the elapsed-time text in the header.")
 
 (defvar emms-lyrics-sync-display--lyrics-marker nil
-  "Marker at the start of the lyrics section (NIL insertion-type).
-`redraw-lyrics-only' deletes from here to point-max and re-inserts.
-NIL type keeps this boundary fixed regardless of inserts at the position.")
+  "NIL-type marker at the start of the lyrics section.")
 
 (defvar emms-lyrics-sync-display--waveform-marker nil
-  "Marker at the start of the waveform bar content (NIL insertion-type).
-Set after the separator newline, before bar content.  NIL type keeps
-the marker anchored so `update-waveform-cursor' always replaces exactly
-the bar region without drifting into the lyrics above.")
+  "NIL-type marker at the start of the waveform bar content.")
 
 (defvar emms-lyrics-sync-display--current-file-path nil
-  "File path of the track currently rendered in the lyrics buffer.
-Used to distinguish new-track (full redraw) from same-track (partial update).
-Reset to nil on stop so the next play always triggers a full redraw.")
+  "File path of the track currently rendered in the lyrics buffer.")
 
 (defvar emms-lyrics-sync-display--tick-counter 0
-  "Counter incremented every display tick.
-Throttles waveform cursor updates to ~1/s (every 10 ticks).")
+  "Counter incremented every display tick.")
 
 (defvar emms-lyrics-sync-display--word-positions nil
-  "Vector of (buf-start buf-end emms-lyrics-sync-word) triples for the
-current A2 line.  Populated during lyrics redraw; consumed by the tick.")
+  "Vector of (buf-start buf-end emms-lyrics-sync-word) triples.")
 
 (defvar emms-lyrics-sync-display--cover-cache (make-hash-table :test #'equal)
   "Cache: file-path → Emacs image object.")
@@ -236,7 +207,8 @@ current A2 line.  Populated during lyrics redraw; consumed by the tick.")
     (get-buffer-window emms-lyrics-sync-display--buffer t)))
 
 (defun emms-lyrics-sync-display--body-width ()
-  "Return the usable body width of the lyrics window in characters."
+  "Return the usable body width of the lyrics window in characters.
+Subtracts 2 for the left and right margin widths set in display.el."
   (let ((win (emms-lyrics-sync-display--window)))
     (if win (- (window-body-width win) 2) 60)))
 
