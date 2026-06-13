@@ -28,6 +28,10 @@
 ;;               Long lines are word-wrapped with equal left/right margins.
 ;;               When current line wraps to cur-height physical lines,
 ;;               n-after is reduced by (cur-height - 1) so total stays fixed.
+;;             • PRE-ROLL (before first timestamp): line 0 is shown in
+;;               future-line-face at its current-slot position (n-bef blank
+;;               rows above, separators on both sides).  When its timestamp
+;;               fires, it turns amber in-place with zero positional shift.
 ;;             • A2 word-level render with buffer-position capture.
 ;;             • Overlay helpers for word-current and word-sung highlighting.
 ;;             • Elapsed-time incremental update.
@@ -343,35 +347,43 @@ Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
   "Insert the lyrics section for DOC at POS-MS.
 
 Always occupies exactly `emms-lyrics-sync-display-lyrics-height' physical
-screen lines regardless of wrapping or playback position.
+screen lines regardless of line wrapping or playback position.
 
-Algorithm (synced LRC normal case):
-  1. cur-height  = count-wrapped-lines(cur-text)  [≥1]
-  2. fut-budget  = n-after - (cur-height - 1)
-  3. past: walk BACKWARD from cur-idx-1, accumulate count-wrapped-lines;
-           stop when adding the next line would EXCEED the n-before budget.
-           → past-lines (forward order), past-phys (total physical rows)
-  4. future: walk FORWARD from cur-idx+1, accumulate count-wrapped-lines;
-             stop when adding the next line would EXCEED fut-budget.
-             → future-lines (forward order), future-phys
-  5. top-pad = n-before  - past-phys   (blank lines)
-  6. bot-pad = fut-budget - future-phys (blank lines)
+NORMAL PATH (cur-idx ≥ 0):
+  Past and future lines are collected by accumulating PHYSICAL row counts
+  (via `count-wrapped-lines') until per-section budgets are exhausted.
+  A line that would overflow the remaining budget is excluded; the
+  remainder is padded with blank lines.
 
-Total physical rows:
-  top-pad + past-phys + 1 (blank) + cur-height + 1 (blank)
-    + future-phys + bot-pad
-  = n-before + 1 + cur-height + 1 + (n-after - (cur-height-1))
-  = n-before + n-after + 3
-  = lyrics-height  ✓  (with default 3+6+3 = 12)
+  Total = n-before + 1 + cur-height + 1 + n-after - (cur-height-1)
+        = n-before + n-after + 3  ← constant ✓
+
+PRE-ROLL PATH (cur-idx < 0, before first timestamp):
+  Line 0 is placed in its future current-slot position using
+  `emms-lyrics-sync-future-line-face'.  When its timestamp fires, it
+  turns amber (current-face) in-place with ZERO positional shift.
+
+  Layout:
+    n-before blank rows   (top-pad: no past lines yet)
+    1 blank row           (separator before current slot)
+    line[0] rows          (future-face, occupying the current-slot)
+    1 blank row           (separator after current slot)
+    lines[1..k] rows      (future-face, up to fut-budget physical rows)
+    bot-pad blank rows
+
+  Total = n-before + 1 + first-height + 1 + fut-budget
+        = n-before + n-after + 3 ✓
 
 Sets `emms-lyrics-sync-display--word-positions' when current line is A2."
   (setq emms-lyrics-sync-display--word-positions nil)
   (let* ((n-bef  emms-lyrics-sync-display-context-before)
          (n-aft  emms-lyrics-sync-display-context-after))
     (cond
+
      ;; ── No lyrics ──────────────────────────────────────────────────────────
      ((null doc)
       (let ((total emms-lyrics-sync-display-lyrics-height))
+        ;; Centre "(no lyrics)" on the middle row, pad rest with blank lines
         (dotimes (_ (/ total 2)) (insert "\n"))
         (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
                             'face 'emms-lyrics-sync-past-line-face) "\n")
@@ -393,104 +405,142 @@ Sets `emms-lyrics-sync-display--word-positions' when current line is A2."
              (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))
 
         (if (< cur-idx 0)
-            ;; ── Before first timestamp ──────────────────────────────────────
-            ;; Show as many future lines as fit within lyrics-height physical
-            ;; rows (contiguous from index 0), top-padding the rest.
-            (let ((future-lines nil)
-                  (phys-total   0)
-                  (budget       emms-lyrics-sync-display-lyrics-height))
-              (cl-loop for i from 0 below n
-                       for line  = (aref lines i)
-                       for lphys = (emms-lyrics-sync-display--count-wrapped-lines
-                                    (emms-lyrics-sync-line-text line))
-                       while (and (> budget 0) (<= lphys budget))
-                       do (push line future-lines)
-                          (cl-decf budget lphys)
-                          (cl-incf phys-total lphys))
-              (let ((top-pad (max 0 (- emms-lyrics-sync-display-lyrics-height
-                                       phys-total))))
-                (dotimes (_ top-pad) (insert "\n"))
-                (dolist (line (nreverse future-lines))
+
+            ;; ── Pre-roll: before first timestamp ────────────────────────────
+            ;; Position line 0 in its current-slot so the display doesn't
+            ;; jump when the first lyric fires.
+            (if (= n 0)
+                ;; Edge case: synced doc with no lines — fill with blanks
+                (dotimes (_ emms-lyrics-sync-display-lyrics-height) (insert "\n"))
+
+              (let* ((first-line   (aref lines 0))
+                     (first-text   (emms-lyrics-sync-line-text first-line))
+                     ;; Physical rows of line 0 (A2 lines never wrap)
+                     (first-height (if (emms-lyrics-sync-line-words first-line)
+                                       1
+                                     (emms-lyrics-sync-display--count-wrapped-lines
+                                      first-text)))
+                     ;; fut-budget: how many physical future rows after line 0
+                     (fut-budget   (max 0 (- n-aft (- first-height 1))))
+                     ;; Collect lines[1..] up to fut-budget physical rows.
+                     ;; A line that would exceed the remaining budget is skipped.
+                     (future-lines
+                      (let (acc (budget fut-budget))
+                        (cl-loop for i from 1 below n
+                                 for line = (aref lines i)
+                                 for ltext = (emms-lyrics-sync-line-text line)
+                                 for lphys = (if (emms-lyrics-sync-line-words line)
+                                                 1
+                                               (emms-lyrics-sync-display--count-wrapped-lines
+                                                ltext))
+                                 while (and (> budget 0) (<= lphys budget))
+                                 do (push line acc)
+                                    (cl-decf budget lphys))
+                        (nreverse acc)))
+                     (future-phys
+                      (cl-loop for line in future-lines
+                               sum (if (emms-lyrics-sync-line-words line)
+                                       1
+                                     (emms-lyrics-sync-display--count-wrapped-lines
+                                      (emms-lyrics-sync-line-text line)))))
+                     (bot-pad (max 0 (- fut-budget future-phys))))
+                ;; Top padding — n-bef blank rows (no past lines yet)
+                (dotimes (_ n-bef) (insert "\n"))
+                ;; Blank separator before the current slot
+                (insert "\n")
+                ;; Line 0 in the current-slot position, shown in future-face.
+                ;; When its timestamp fires it turns amber with no positional shift.
+                (emms-lyrics-sync-display--wrap-and-insert
+                 first-text 'emms-lyrics-sync-future-line-face)
+                ;; Blank separator after the current slot
+                (insert "\n")
+                ;; Future lines (line 1 onward) — same positions they will hold
+                ;; once line 0 becomes current
+                (dolist (line future-lines)
                   (emms-lyrics-sync-display--wrap-and-insert
                    (emms-lyrics-sync-line-text line)
-                   'emms-lyrics-sync-future-line-face))))
+                   'emms-lyrics-sync-future-line-face))
+                ;; Bottom padding
+                (dotimes (_ bot-pad) (insert "\n"))))
 
           ;; ── Normal: render fixed-height context window ───────────────────
           (let* ((cur-line   (aref lines cur-idx))
                  (cur-text   (emms-lyrics-sync-line-text cur-line))
-                 ;; A2 lines always render on exactly 1 physical row
+                 ;; Physical rows of the current line (A2 lines never wrap)
                  (cur-height (if (emms-lyrics-sync-line-words cur-line)
                                  1
-                               (emms-lyrics-sync-display--count-wrapped-lines
-                                cur-text)))
-                 ;; fut-budget shrinks when current line is taller than 1 row
+                               (emms-lyrics-sync-display--count-wrapped-lines cur-text)))
+                 ;; Reduce future budget when current line wraps
                  (fut-budget (max 0 (- n-aft (- cur-height 1))))
-
-                 ;; ── Collect past lines (physical-row budget) ──────────────
-                 ;; Walk BACKWARD; stop when next line would exceed budget.
-                 ;; Result is in forward (display) order because push+downfrom
-                 ;; reverses the backward walk.
-                 (past-phys 0)
+                 ;; ── Collect past lines ──────────────────────────────────────
+                 ;; Walk backward from cur-idx, accumulate PHYSICAL rows.
+                 ;; A line that would exceed the remaining budget is excluded.
+                 ;; push+downfrom yields forward (oldest-first) order directly.
                  (past-lines
                   (let (acc (budget n-bef))
                     (cl-loop for i downfrom (1- cur-idx) to 0
-                             for line  = (aref lines i)
-                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines
-                                          (emms-lyrics-sync-line-text line))
+                             for line = (aref lines i)
+                             for ltext = (emms-lyrics-sync-line-text line)
+                             for lphys = (if (emms-lyrics-sync-line-words line)
+                                             1
+                                           (emms-lyrics-sync-display--count-wrapped-lines
+                                            ltext))
                              while (and (> budget 0) (<= lphys budget))
                              do (push line acc)
-                                (cl-decf budget lphys)
-                                (cl-incf past-phys lphys))
-                    acc))  ; forward order (push+downfrom reversal)
-
+                                (cl-decf budget lphys))
+                    acc))  ; already oldest-first due to push+downfrom
+                 (past-phys
+                  (cl-loop for line in past-lines
+                           sum (if (emms-lyrics-sync-line-words line)
+                                   1
+                                 (emms-lyrics-sync-display--count-wrapped-lines
+                                  (emms-lyrics-sync-line-text line)))))
                  (top-pad (max 0 (- n-bef past-phys)))
-
-                 ;; ── Collect future lines (physical-row budget) ────────────
-                 ;; Walk FORWARD; stop when next line would exceed fut-budget.
-                 (future-phys 0)
+                 ;; ── Collect future lines ────────────────────────────────────
+                 ;; Walk forward from cur-idx+1, accumulate physical rows.
                  (future-lines
                   (let (acc (budget fut-budget))
                     (cl-loop for i from (1+ cur-idx) below n
-                             for line  = (aref lines i)
-                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines
-                                          (emms-lyrics-sync-line-text line))
+                             for line = (aref lines i)
+                             for ltext = (emms-lyrics-sync-line-text line)
+                             for lphys = (if (emms-lyrics-sync-line-words line)
+                                             1
+                                           (emms-lyrics-sync-display--count-wrapped-lines
+                                            ltext))
                              while (and (> budget 0) (<= lphys budget))
                              do (push line acc)
-                                (cl-decf budget lphys)
-                                (cl-incf future-phys lphys))
+                                (cl-decf budget lphys))
                     (nreverse acc)))
-
+                 (future-phys
+                  (cl-loop for line in future-lines
+                           sum (if (emms-lyrics-sync-line-words line)
+                                   1
+                                 (emms-lyrics-sync-display--count-wrapped-lines
+                                  (emms-lyrics-sync-line-text line)))))
                  (bot-pad (max 0 (- fut-budget future-phys))))
-
-            ;; Top padding (fills unused past rows)
+            ;; Top padding
             (dotimes (_ top-pad) (insert "\n"))
-
-            ;; Past lines (oldest → newest, each via wrap-and-insert)
+            ;; Past lines (oldest first, past-face)
             (dolist (line past-lines)
               (emms-lyrics-sync-display--wrap-and-insert
                (emms-lyrics-sync-line-text line)
                'emms-lyrics-sync-past-line-face))
-
             ;; Blank separator before current
             (insert "\n")
-
-            ;; Current line (A2 or plain)
+            ;; Current line — A2 records word positions; others use current-face
             (if (emms-lyrics-sync-line-words cur-line)
                 (setq emms-lyrics-sync-display--word-positions
                       (emms-lyrics-sync-display--render-a2-line cur-line))
               (emms-lyrics-sync-display--wrap-and-insert
                cur-text 'emms-lyrics-sync-current-line-face))
-
             ;; Blank separator after current
             (insert "\n")
-
             ;; Future lines
             (dolist (line future-lines)
               (emms-lyrics-sync-display--wrap-and-insert
                (emms-lyrics-sync-line-text line)
                'emms-lyrics-sync-future-line-face))
-
-            ;; Bottom padding (fills unused future rows)
+            ;; Bottom padding
             (dotimes (_ bot-pad) (insert "\n")))))))))
 
 ;;; ── Overlay Management ───────────────────────────────────────────────────────
