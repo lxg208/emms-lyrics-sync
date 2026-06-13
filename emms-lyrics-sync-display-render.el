@@ -1,32 +1,35 @@
 ;;; emms-lyrics-sync-display-render.el --- Buffer-insert rendering functions  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-display-render.el
-;; Created : 2026-06-12 22:10 UTC
+;; Created : 2026-06-13 04:25 UTC
 ;; Purpose : All buffer-insert rendering functions for the emms-lyrics-sync
 ;;           display subsystem.  Covers:
 ;;             • Cover art — synchronous ffmpeg extraction to a STABLE cache
 ;;               path (never a temp file) + sidecar search + memory cache.
-;;               Stable path prevents "Cannot find image file" errors caused
-;;               by Emacs lazy-loading image pixels after a temp file is gone.
-;;             • Header rendering — 3-line metadata block matching foobar2000
-;;               waveform seekbar format:
-;;                 Artist[ - Composer] - Album
-;;                 [Track. ]Title
-;;                 [CODEC | bits/kHz | kbps kbps | channels | ]elapsed / duration
-;;               Elapsed text position is recorded by inserting the tech line
-;;               in two parts and calling (point) directly — no string-search,
-;;               no fragile offset arithmetic.
+;;             • Header rendering — 5-line metadata block:
+;;                 Line 1: Artist[ - Composer]
+;;                 Line 2: Album  (omitted entirely when absent)
+;;                 Line 3: [Track. ]Title
+;;                 Line 4: CODEC | bits/kHz | kbps kbps | channels
+;;                 Line 5: elapsed / duration
+;;               Each line is independently centered.  Elapsed position is
+;;               recorded by inserting line 5 in two parts and calling
+;;               (point) directly — no string-search.
 ;;             • ffprobe async augmentation — populates codec, sample-rate,
-;;               bits-per-sample, bitrate, channel-layout from the audio file.
-;;               Uses nested if instead of cl-return-from to avoid cl-block
-;;               scope issues.  Runs only once per track (guarded by codec slot).
-;;             • Lyrics rendering — context window using lrc-seek directly.
-;;             • A2 word-level render with buffer-position capture for overlays.
+;;               bits-per-sample, bitrate, channel-layout.  Guarded by codec
+;;               slot to prevent infinite redraw loop.
+;;             • Lyrics rendering — FIXED HEIGHT of
+;;               (context-before + 1 + context-after + 2) lines, always.
+;;               Missing lines above/below are padded with blank lines so the
+;;               waveform never moves.
+;;               Current line: color only (no bold), amber #ffcb6b.
+;;               Long lines are word-wrapped with equal left/right margins.
+;;               When current line wraps to cur-height physical lines,
+;;               n-after is reduced by (cur-height - 1) so total stays fixed.
+;;             • A2 word-level render with buffer-position capture.
 ;;             • Overlay helpers for word-current and word-sung highlighting.
 ;;             • Elapsed-time incremental update.
 ;;               Marker invariant: elapsed-marker NIL type (stays at start),
 ;;               elapsed-end-marker T type (advances past inserted content).
-;;               delete-region always removes exactly the current elapsed text;
-;;               insert always lands at the correct start position.
 ;;
 ;; Copyright (C) 2026  emms-lyrics-sync contributors
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -72,7 +75,7 @@ Format: <emms-lyrics-sync-cache-dir>/covers/<md5-of-path>.jpg"
 (defun emms-lyrics-sync-display--extract-embedded-cover (file-path)
   "Extract embedded cover art from FILE-PATH via ffmpeg (synchronous).
 Writes to a STABLE path under emms-lyrics-sync-cache-dir/covers/.
-Returns the stable path on success, nil on failure or absent ffmpeg.
+Returns the stable path on success, nil on failure.
 The file is NEVER deleted — Emacs lazy-loads image pixels on first paint."
   (when (executable-find "ffmpeg")
     (let ((out (emms-lyrics-sync-display--cover-stable-path file-path)))
@@ -91,8 +94,7 @@ The file is NEVER deleted — Emacs lazy-loads image pixels on first paint."
       (and out (file-exists-p out) out))))
 
 (defun emms-lyrics-sync-display--cover-image (file-path)
-  "Return a (possibly cached) Emacs image for the cover of FILE-PATH, or nil.
-Resolution order: memory cache → stable embedded extract → sidecar file."
+  "Return a (possibly cached) Emacs image for the cover of FILE-PATH, or nil."
   (when (and (display-graphic-p)
              (> emms-lyrics-sync-display-cover-height 0)
              file-path)
@@ -109,27 +111,15 @@ Resolution order: memory cache → stable embedded extract → sidecar file."
           img))))
 
 ;;; ── ffprobe Tech-Info Augmentation ───────────────────────────────────────────
-;;
-;; EMMS backends typically do not populate info-codec, info-samplerate,
-;; info-bits-per-sample, info-bitrate, or info-channels.  We augment the
-;; emms-lyrics-sync-track struct asynchronously via ffprobe so those fields
-;; are available for the header tech line.
-;;
-;; Called from full-redraw, but ONLY when track-codec is nil — this prevents
-;; an infinite loop where the ffprobe completion callback fires full-redraw
-;; which would otherwise call ffprobe again.
 
 (defun emms-lyrics-sync-display--ffprobe-augment (track callback)
   "Augment TRACK tech fields asynchronously via ffprobe; call CALLBACK when done.
-CALLBACK is called with no arguments after the struct is updated in-place.
-Calls CALLBACK immediately (no-op) when:
-  - ffprobe is unavailable or TRACK has no file-path
-  - TRACK already has codec set (already augmented)"
+Calls CALLBACK immediately when ffprobe is unavailable, track has no
+file-path, or track already has codec set (avoid re-running per track)."
   (let ((fp (emms-lyrics-sync-track-file-path track)))
     (if (not (and fp (executable-find "ffprobe")))
         (funcall callback)
       (if (emms-lyrics-sync-track-codec track)
-          ;; Already augmented — skip ffprobe to avoid callback loop
           (funcall callback)
         (let ((buf (generate-new-buffer " *emms-ffprobe-tech*")))
           (make-process
@@ -157,80 +147,71 @@ Calls CALLBACK immediately (no-op) when:
                             (strs   (cdr (assq 'streams obj)))
                             (audio  (and strs (> (length strs) 0)
                                          (aref strs 0)))
-                            (fmt    (cdr (assq 'format obj)))
-                            ;; codec_name: upcase for display (flac → FLAC)
-                            (codec  (let ((c (and audio
-                                                  (cdr (assq 'codec_name audio)))))
-                                      (and c (upcase c))))
-                            ;; sample_rate arrives as a JSON string "44100"
-                            (sr     (let ((s (and audio
-                                                  (cdr (assq 'sample_rate audio)))))
-                                      (and s (string-to-number s))))
-                            ;; bits_per_raw_sample: ignore 0 (lossy codecs)
-                            (bps    (let* ((b (and audio
-                                                   (cdr (assq 'bits_per_raw_sample
-                                                              audio))))
-                                           (n (if (stringp b)
-                                                  (string-to-number b)
-                                                (or b 0))))
-                                      (and (> n 0) n)))
-                            ;; bitrate: prefer stream, fallback to format
-                            (kbps   (let* ((raw (or (and audio
-                                                         (cdr (assq 'bit_rate audio)))
-                                                    (and fmt
-                                                         (cdr (assq 'bit_rate fmt)))))
-                                           (n   (if (stringp raw)
-                                                    (string-to-number raw)
-                                                  (or raw 0))))
-                                      (and (> n 0) (round (/ n 1000.0)))))
-                            ;; channels: prefer channel_layout string ("stereo")
-                            ;;           over raw channel count integer
-                            (ch     (let ((layout (and audio
-                                                       (cdr (assq 'channel_layout
-                                                                  audio))))
-                                          (count  (and audio
-                                                       (cdr (assq 'channels audio)))))
-                                      (cond
-                                       ((and (stringp layout)
-                                             (not (string-empty-p layout)))
-                                        layout)
-                                       ((integerp count)
-                                        (format "%d ch" count))
-                                       (t nil)))))
-                       (when codec (setf (emms-lyrics-sync-track-codec          track) codec))
-                       (when sr    (setf (emms-lyrics-sync-track-sample-rate    track) sr))
-                       (when bps   (setf (emms-lyrics-sync-track-bits-per-sample track) bps))
-                       (when kbps  (setf (emms-lyrics-sync-track-bitrate        track) kbps))
-                       (when ch    (setf (emms-lyrics-sync-track-channels       track) ch)))
+                            (fmt    (cdr (assq 'format  obj))))
+                       (when audio
+                         ;; codec
+                         (let ((cn (cdr (assq 'codec_name audio))))
+                           (when (stringp cn)
+                             (setf (emms-lyrics-sync-track-codec track)
+                                   (upcase cn))))
+                         ;; sample rate
+                         (let ((sr (cdr (assq 'sample_rate audio))))
+                           (when (stringp sr)
+                             (setf (emms-lyrics-sync-track-sample-rate track)
+                                   (string-to-number sr))))
+                         ;; bits per sample
+                         (let* ((b (cdr (assq 'bits_per_raw_sample audio)))
+                                (n (if (stringp b) (string-to-number b)
+                                     (or b 0))))
+                           (when (> n 0)
+                             (setf (emms-lyrics-sync-track-bits-per-sample track) n)))
+                         ;; bitrate: stream first, format fallback
+                         (let* ((raw (or (cdr (assq 'bit_rate audio))
+                                         (and fmt (cdr (assq 'bit_rate fmt)))))
+                                (n   (if (stringp raw) (string-to-number raw)
+                                       (or raw 0))))
+                           (when (> n 0)
+                             (setf (emms-lyrics-sync-track-bitrate track)
+                                   (round (/ n 1000.0)))))
+                         ;; channels
+                         (let ((layout (cdr (assq 'channel_layout audio)))
+                               (count  (cdr (assq 'channels audio))))
+                           (cond
+                            ((and (stringp layout) (not (string-empty-p layout)))
+                             (setf (emms-lyrics-sync-track-channels track) layout))
+                            ((integerp count)
+                             (setf (emms-lyrics-sync-track-channels track)
+                                   (format "%d ch" count)))))))
                    (error nil))
                  (funcall callback))))))))))
 
 ;;; ── Header Rendering ─────────────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--sr-string (hz)
-  "Format sample-rate HZ as \"44.1\" or \"48\" for the tech line.
-Matches foobar2000 waveform seekbar format:
-  44100 → \"44.1\"   48000 → \"48\"   88200 → \"88.2\"   96000 → \"96\""
+  "Format sample-rate HZ as \"44.1\" or \"48\" kHz for the tech line.
+44100 → \"44.1\"   48000 → \"48\"   88200 → \"88.2\"   96000 → \"96\""
   (when (and (integerp hz) (> hz 0))
-    (let* ((khz  (/ hz 1000))
-           (rem  (% hz 1000)))
+    (let* ((khz (/ hz 1000))
+           (rem (% hz 1000)))
       (if (zerop rem)
           (number-to-string khz)
-        ;; First decimal digit only: 44100 → 44.1, 22050 → 22.0, 88200 → 88.2
         (format "%d.%d" khz (/ rem 100))))))
 
 (defun emms-lyrics-sync-display--render-header (track elapsed-s)
-  "Insert the 3-line metadata header for TRACK at point.
-Returns (elapsed-buf-start . elapsed-buf-end) — exact buffer positions
-bracketing the elapsed text, used by `emms-lyrics-sync-display--update-elapsed'.
+  "Insert the metadata header for TRACK at point.
+Returns (elapsed-buf-start . elapsed-buf-end).
 
-The tech line is inserted in two parts so that (point) can be recorded
-directly before and after the elapsed text — no string-search needed.
+Layout (foobar2000 style, each line independently centered):
+  Line 1: Artist[ - Composer]                        artist-face
+  Line 2: Album          (omitted when absent)       album-face
+  Line 3: [Track. ]Title                             title-face
+  Line 4: CODEC | bits/kHz | kbps | channels         tech-face
+           (omitted entirely when all fields nil)
+  Line 5: elapsed / duration                         elapsed/tech-face
 
-Header format (foobar2000 waveform seekbar style):
-  Line 1: Artist[ - Composer] - Album               (centered)
-  Line 2: [Track. ]Title                             (centered)
-  Line 3: [CODEC | bits/kHz | kbps | channels | ]elapsed / duration (centered)"
+Face design note: NO :weight bold or :height on any face used here.
+Both properties scale character pixel width in GUI Emacs, breaking
+string-width–based centering.  Colour alone provides visual hierarchy."
   (let* ((artist   (emms-lyrics-sync-track-artist          track))
          (composer (emms-lyrics-sync-track-composer         track))
          (album    (emms-lyrics-sync-track-album            track))
@@ -242,62 +223,118 @@ Header format (foobar2000 waveform seekbar style):
          (kbps     (emms-lyrics-sync-track-bitrate          track))
          (ch       (emms-lyrics-sync-track-channels         track))
          (dur      (emms-lyrics-sync-track-duration         track))
-         ;; ── Line 1: Artist[ - Composer] - Album ──────────────────────────
-         (l1 (mapconcat #'identity
-                        (delq nil (list (or artist "Unknown Artist")
-                                        composer
-                                        album))
-                        " - "))
-         ;; ── Line 2: [Track. ]Title ────────────────────────────────────────
-         (l2 (concat (if trknum (format "%s. " trknum) "")
-                     (or title "Unknown Title")))
-         ;; ── Line 3 static parts ───────────────────────────────────────────
          (sr-s     (emms-lyrics-sync-display--sr-string sr))
-         (bps/sr   (cond ((and (integerp bps) (> bps 0) sr-s)
-                          (format "%d/%s" bps sr-s))
-                         (sr-s sr-s)
-                         (t    nil)))
-         (kbps-str (when (and (integerp kbps) (> kbps 0))
-                     (format "%d kbps" kbps)))
-         (static   (mapconcat #'identity
-                              (delq nil (list codec bps/sr kbps-str ch))
-                              " | "))
-         ;; ── Line 3 dynamic parts ──────────────────────────────────────────
+         ;; ── Line 1: Artist[ - Composer] ──────────────────────────────────
+         (l1 (concat (or artist "Unknown Artist")
+                     (if composer (concat " - " composer) "")))
+         ;; ── Line 2: Album (nil → skip line entirely) ─────────────────────
+         (l2 (and (stringp album) (not (string-empty-p album)) album))
+         ;; ── Line 3: [Track. ]Title ────────────────────────────────────────
+         (l3 (concat (if (and trknum (not (string-empty-p trknum)))
+                         (format "%s. " trknum) "")
+                     (or title "Unknown Title")))
+         ;; ── Line 4: tech fields (nil when all absent) ────────────────────
+         (bps/sr (cond ((and bps sr-s) (format "%d/%s" bps sr-s))
+                       (sr-s sr-s)
+                       (t nil)))
+         (kbps-s (when (and (integerp kbps) (> kbps 0))
+                   (format "%d kbps" kbps)))
+         (l4-parts (delq nil (list codec bps/sr kbps-s ch)))
+         (l4 (and l4-parts (mapconcat #'identity l4-parts " | ")))
+         ;; ── Line 5: elapsed / duration ────────────────────────────────────
          (elapsed-str (emms-lyrics-sync-display--format-time elapsed-s))
          (dur-str     (emms-lyrics-sync-display--format-time dur))
-         (l3-suffix   (concat " / " dur-str))
-         (l3-prefix   (if (string-empty-p static) "" (concat static " | ")))
-         (l3-full     (concat l3-prefix elapsed-str l3-suffix))
-         (pad-chars   (max 0 (/ (- (emms-lyrics-sync-display--body-width)
-                                    (string-width l3-full))
+         (l5-suffix   (concat " / " dur-str))
+         ;; Compute left pad for line 5 independently (for marker placement)
+         (l5-full     (concat elapsed-str l5-suffix))
+         (l5-pad      (max 0 (/ (- (emms-lyrics-sync-display--body-width)
+                                    (string-width l5-full))
                                  2)))
          elapsed-start elapsed-end)
     ;; ── Insert line 1 ────────────────────────────────────────────────────────
     (insert (propertize (emms-lyrics-sync-display--center l1)
                         'face 'emms-lyrics-sync-artist-face) "\n")
-    ;; ── Insert line 2 ────────────────────────────────────────────────────────
-    (insert (propertize (emms-lyrics-sync-display--center l2)
+    ;; ── Insert line 2 (album) — only when present ────────────────────────────
+    (when l2
+      (insert (propertize (emms-lyrics-sync-display--center l2)
+                          'face 'emms-lyrics-sync-album-face) "\n"))
+    ;; ── Insert line 3 (title) ────────────────────────────────────────────────
+    (insert (propertize (emms-lyrics-sync-display--center l3)
                         'face 'emms-lyrics-sync-title-face) "\n")
-    ;; ── Insert line 3 in two parts so we record elapsed position directly ────
-    (let ((tech 'emms-lyrics-sync-tech-face))
-      (insert (propertize (make-string pad-chars ?\s) 'face tech))
-      (unless (string-empty-p static)
-        (insert (propertize (concat static " | ") 'face tech)))
-      ;; Record start position immediately before elapsed text
-      (setq elapsed-start (point))
-      (insert (propertize elapsed-str 'face 'emms-lyrics-sync-elapsed-face))
-      ;; Record end position immediately after elapsed text
-      (setq elapsed-end (point))
-      (insert (propertize l3-suffix 'face tech)))
+    ;; ── Insert line 4 (tech) — only when at least one field present ──────────
+    (when l4
+      (insert (propertize (emms-lyrics-sync-display--center l4)
+                          'face 'emms-lyrics-sync-tech-face) "\n"))
+    ;; ── Insert line 5 (elapsed / duration) in two parts ─────────────────────
+    ;; Inserting in two parts lets us record (point) directly before and after
+    ;; the elapsed text — no fragile string-search needed.
+    (insert (propertize (make-string l5-pad ?\s)
+                        'face 'emms-lyrics-sync-tech-face))
+    (setq elapsed-start (point))
+    (insert (propertize elapsed-str 'face 'emms-lyrics-sync-elapsed-face))
+    (setq elapsed-end (point))
+    (insert (propertize l5-suffix 'face 'emms-lyrics-sync-tech-face))
     (insert "\n")
     (cons elapsed-start elapsed-end)))
 
 ;;; ── Lyrics Rendering ─────────────────────────────────────────────────────────
 
+(defun emms-lyrics-sync-display--wrap-and-center (text face)
+  "Insert TEXT with FACE, word-wrapped and centered, at point.
+Each physical line is independently centered.
+Returns the number of physical lines inserted."
+  (let* ((width  (emms-lyrics-sync-display--body-width))
+         (words  (split-string (string-trim text) "[ \t]+" t))
+         lines current-words current-w)
+    ;; Greedy word-wrap
+    (dolist (word words)
+      (let ((w (string-width word)))
+        (if (null current-words)
+            (setq current-words (list word) current-w w)
+          (if (> (+ current-w 1 w) width)
+              (progn
+                (push (nreverse current-words) lines)
+                (setq current-words (list word) current-w w))
+            (push word current-words)
+            (setq current-w (+ current-w 1 w))))))
+    (when current-words
+      (push (nreverse current-words) lines))
+    (let ((result (nreverse lines))
+          (count  0))
+      (dolist (line-words result)
+        (let* ((line-str (mapconcat #'identity line-words " "))
+               (pad      (max 0 (/ (- width (string-width line-str)) 2))))
+          (insert (make-string pad ?\s))
+          (insert (propertize line-str 'face face))
+          (insert "\n")
+          (setq count (1+ count))))
+      (max 1 count))))
+
+(defun emms-lyrics-sync-display--count-wrapped-lines (text)
+  "Return the number of physical lines TEXT wraps to at current body width.
+Uses the same greedy word-wrap algorithm as `wrap-and-center'."
+  (let* ((width  (emms-lyrics-sync-display--body-width))
+         (words  (split-string (string-trim text) "[ \t]+" t))
+         (line-w 0)
+         (count  1))
+    (dolist (word words)
+      (let ((w (string-width word)))
+        (if (zerop line-w)
+            (setq line-w w)
+          (if (> (+ line-w 1 w) width)
+              (setq count  (1+ count)
+                    line-w w)
+            (setq line-w (+ line-w 1 w))))))
+    (max 1 count)))
+
+(defun emms-lyrics-sync-display--render-plain-line (line face)
+  "Insert LINE text with FACE, word-wrapped and centered."
+  (emms-lyrics-sync-display--wrap-and-center
+   (emms-lyrics-sync-line-text line) face))
+
 (defun emms-lyrics-sync-display--render-a2-line (line)
   "Insert A2 word-level LINE centered at point, recording word positions.
-Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples in
-forward order, for use by `emms-lyrics-sync-display--update-word-overlays'."
+Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
   (let* ((words     (emms-lyrics-sync-line-words line))
          (line-text (emms-lyrics-sync-line-text  line))
          (width     (emms-lyrics-sync-display--body-width))
@@ -307,70 +344,99 @@ forward order, for use by `emms-lyrics-sync-display--update-word-overlays'."
     (insert (make-string pad ?\s))
     (dolist (word words)
       (let ((start (point)))
-        (insert (emms-lyrics-sync-word-text word))
+        ;; Insert with current-line-face as base; overlays paint sung/current
+        (insert (propertize (emms-lyrics-sync-word-text word)
+                            'face 'emms-lyrics-sync-current-line-face))
         (push (list start (point) word) positions)))
     (insert "\n")
     (vconcat (nreverse positions))))
 
-(defun emms-lyrics-sync-display--render-plain-line (line face)
-  "Insert LINE text with FACE, centered."
-  (insert (propertize (emms-lyrics-sync-display--center
-                       (emms-lyrics-sync-line-text line))
-                      'face face)
-          "\n"))
-
 (defun emms-lyrics-sync-display--render-lyrics (doc pos-ms)
   "Insert the lyrics section for DOC at POS-MS.
-Sets `emms-lyrics-sync-display--word-positions' when the current line is A2.
 
-Uses `emms-lyrics-sync-lrc-seek' directly (binary search) rather than
-`emms-lyrics-sync-lrc-context' to avoid the alist-key mismatch that caused
-the always-show-first-N-lines regression."
+Total height is ALWAYS (n-before + n-after + 3) lines:
+  top-pad blank lines  (n-before - available past lines)
+  past lines           (up to n-before)
+  1 blank line
+  current line         (cur-height physical lines, 1 for A2)
+  1 blank line
+  future lines         (up to eff-n-after = n-after - (cur-height - 1))
+  bottom-pad blank lines
+
+When the current line wraps to cur-height > 1 physical lines, eff-n-after
+is reduced by (cur-height - 1) so the grand total stays constant."
   (setq emms-lyrics-sync-display--word-positions nil)
-  (cond
-   ;; No lyrics available
-   ((null doc)
-    (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
-                        'face 'emms-lyrics-sync-past-line-face) "\n"))
-   ;; Plain (unsynced) text: show all lines
-   ((emms-lyrics-sync-lrc-doc-plain-p doc)
-    (cl-loop for line across (emms-lyrics-sync-lrc-doc-lines doc) do
-      (emms-lyrics-sync-display--render-plain-line
-       line 'emms-lyrics-sync-future-line-face)))
-   ;; Synced LRC: context window around the active line
-   (t
-    (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
-           (n       (length lines))
-           (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms))
-           (n-bef   emms-lyrics-sync-display-context-before)
-           (n-aft   emms-lyrics-sync-display-context-after))
-      (if (< cur-idx 0)
-          ;; Before first timestamp: show upcoming lines as preview
-          (cl-loop for i from 0 below (min n-aft n) do
-            (emms-lyrics-sync-display--render-plain-line
-             (aref lines i) 'emms-lyrics-sync-future-line-face))
-        ;; Normal: render [start … cur-idx … end] context window
-        (let ((start (max 0      (- cur-idx n-bef)))
-              (end   (min (1- n) (+ cur-idx n-aft))))
-          ;; Past lines (before current)
-          (cl-loop for i from start below cur-idx do
-            (emms-lyrics-sync-display--render-plain-line
-             (aref lines i) 'emms-lyrics-sync-past-line-face))
-          ;; Current line — blank lines for visual emphasis
-          (insert "\n")
-          (let ((cur-line (aref lines cur-idx)))
-            (if (emms-lyrics-sync-line-words cur-line)
-                ;; A2: per-word render with position capture
+  (let* ((n-bef        emms-lyrics-sync-display-context-before)
+         (n-aft        emms-lyrics-sync-display-context-after)
+         ;; Fixed total = n-bef + n-aft + 3 (2 blank + 1 current baseline)
+         (fixed-total  (+ n-bef n-aft 3)))
+    (cond
+     ;; ── No lyrics ────────────────────────────────────────────────────────────
+     ((null doc)
+      (dotimes (_ fixed-total) (insert "\n")))
+
+     ;; ── Plain (unsynced) text ─────────────────────────────────────────────────
+     ((emms-lyrics-sync-lrc-doc-plain-p doc)
+      (cl-loop for line across (emms-lyrics-sync-lrc-doc-lines doc) do
+        (emms-lyrics-sync-display--render-plain-line
+         line 'emms-lyrics-sync-future-line-face)))
+
+     ;; ── Synced LRC ───────────────────────────────────────────────────────────
+     (t
+      (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
+             (n       (length lines))
+             (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))
+        (if (< cur-idx 0)
+            ;; Before first timestamp — top pad + blank current slot + preview
+            (let* ((avail-fut (min n n-aft))
+                   (bot-pad   (- n-aft avail-fut)))
+              (dotimes (_ n-bef)        (insert "\n")) ; top pad
+              (insert "\n")                            ; blank before slot
+              (insert "\n")                            ; current slot (empty)
+              (insert "\n")                            ; blank after slot
+              (cl-loop for i from 0 below avail-fut do
+                (emms-lyrics-sync-display--render-plain-line
+                 (aref lines i) 'emms-lyrics-sync-future-line-face))
+              (dotimes (_ (max 0 bot-pad)) (insert "\n")))
+
+          ;; Normal case — compute wrapped height first, then slice
+          (let* ((cur-line   (aref lines cur-idx))
+                 (a2-p       (not (null (emms-lyrics-sync-line-words cur-line))))
+                 ;; A2 lines are never wrapped (word-level render)
+                 (cur-height (if a2-p 1
+                               (emms-lyrics-sync-display--count-wrapped-lines
+                                (emms-lyrics-sync-line-text cur-line))))
+                 ;; Reduce n-after by extra lines the current lyric occupies
+                 (eff-n-aft  (max 0 (- n-aft (1- cur-height))))
+                 (start      (max 0      (- cur-idx n-bef)))
+                 (end        (min (1- n) (+ cur-idx eff-n-aft)))
+                 (avail-past (- cur-idx start))
+                 (avail-fut  (- end cur-idx))
+                 (top-pad    (- n-bef avail-past))
+                 (bot-pad    (- eff-n-aft avail-fut)))
+            ;; Top padding — blank lines when near track start
+            (dotimes (_ (max 0 top-pad)) (insert "\n"))
+            ;; Past lines
+            (cl-loop for i from start below cur-idx do
+              (emms-lyrics-sync-display--render-plain-line
+               (aref lines i) 'emms-lyrics-sync-past-line-face))
+            ;; Blank separator before current line
+            (insert "\n")
+            ;; Current line
+            (if a2-p
                 (setq emms-lyrics-sync-display--word-positions
                       (emms-lyrics-sync-display--render-a2-line cur-line))
-              ;; Standard LRC: whole-line face
+              (emms-lyrics-sync-display--wrap-and-center
+               (emms-lyrics-sync-line-text cur-line)
+               'emms-lyrics-sync-current-line-face))
+            ;; Blank separator after current line
+            (insert "\n")
+            ;; Future lines
+            (cl-loop for i from (1+ cur-idx) to end do
               (emms-lyrics-sync-display--render-plain-line
-               cur-line 'emms-lyrics-sync-current-line-face)))
-          (insert "\n")
-          ;; Future lines (after current)
-          (cl-loop for i from (1+ cur-idx) to end do
-            (emms-lyrics-sync-display--render-plain-line
-             (aref lines i) 'emms-lyrics-sync-future-line-face))))))))
+               (aref lines i) 'emms-lyrics-sync-future-line-face))
+            ;; Bottom padding
+            (dotimes (_ (max 0 bot-pad)) (insert "\n")))))))))
 
 ;;; ── Overlay Management ───────────────────────────────────────────────────────
 
@@ -393,29 +459,34 @@ the always-show-first-N-lines regression."
   "Reposition current-word overlay and paint sung-word overlays for POS-MS."
   (when (and emms-lyrics-sync-display--word-positions
              (buffer-live-p emms-lyrics-sync-display--buffer))
-    (let ((ov           (emms-lyrics-sync-display--ensure-word-overlay))
-          (found-cursor nil))
-      (emms-lyrics-sync-display--clear-sung-overlays)
-      (cl-loop for triple across emms-lyrics-sync-display--word-positions
-               for buf-start = (nth 0 triple)
-               for buf-end   = (nth 1 triple)
-               for word      = (nth 2 triple)
-               for w-start   = (emms-lyrics-sync-word-start-ms word)
-               for w-end     = (or (emms-lyrics-sync-word-end-ms word)
-                                   most-positive-fixnum)
-               do
-               (cond
-                ;; Currently active word
-                ((and (>= pos-ms w-start) (< pos-ms w-end) (not found-cursor))
-                 (setq found-cursor t)
-                 (move-overlay ov buf-start buf-end
-                               emms-lyrics-sync-display--buffer))
-                ;; Already sung
-                ((< w-end pos-ms)
-                 (let ((sung (make-overlay buf-start buf-end
-                                          emms-lyrics-sync-display--buffer)))
-                   (overlay-put sung 'face 'emms-lyrics-sync-word-sung-face)
-                   (push sung emms-lyrics-sync-display--sung-overlays))))))))
+    (with-current-buffer emms-lyrics-sync-display--buffer
+      (let ((ov           (emms-lyrics-sync-display--ensure-word-overlay))
+            (found-cursor nil))
+        (emms-lyrics-sync-display--clear-sung-overlays)
+        (cl-loop for triple across emms-lyrics-sync-display--word-positions
+                 for buf-start = (nth 0 triple)
+                 for buf-end   = (nth 1 triple)
+                 for word      = (nth 2 triple)
+                 for w-start   = (emms-lyrics-sync-word-start-ms word)
+                 for w-end     = (or (emms-lyrics-sync-word-end-ms word)
+                                     most-positive-fixnum)
+                 do
+                 (cond
+                  ;; Currently active word
+                  ((and (>= pos-ms w-start) (< pos-ms w-end)
+                        (not found-cursor))
+                   (setq found-cursor t)
+                   (move-overlay ov buf-start buf-end
+                                 emms-lyrics-sync-display--buffer))
+                  ;; Already sung
+                  ((< w-end pos-ms)
+                   (let ((sung (make-overlay buf-start buf-end
+                                            emms-lyrics-sync-display--buffer)))
+                     (overlay-put sung 'face
+                                  'emms-lyrics-sync-word-sung-face)
+                     (overlay-put sung 'priority 9)
+                     (push sung
+                           emms-lyrics-sync-display--sung-overlays)))))))))
 
 ;;; ── Elapsed Time Incremental Update ─────────────────────────────────────────
 ;;
@@ -423,14 +494,9 @@ the always-show-first-N-lines regression."
 ;;   elapsed-marker      — insertion-type NIL: stays at start of elapsed text.
 ;;   elapsed-end-marker  — insertion-type T:   advances past inserted content.
 ;;
-;; Update procedure:
-;;   1. delete-region [elapsed-marker, elapsed-end-marker]
-;;      → removes old elapsed text; both markers collapse to the same position.
-;;   2. insert new elapsed text at elapsed-marker position (point after delete).
-;;      → elapsed-marker (NIL) stays at start.
-;;      → elapsed-end-marker (T) advances to end of new text.
-;;
-;; This invariant holds regardless of string length changes between updates.
+;; After delete-region both markers collapse to start.
+;; After insert, end-marker (T) advances to end of new text.
+;; Next call deletes exactly the previous elapsed text.
 
 (defun emms-lyrics-sync-display--update-elapsed (elapsed-s)
   "Replace only the elapsed-time text in the header for ELAPSED-S seconds."
@@ -442,8 +508,10 @@ the always-show-first-N-lines regression."
       (let ((inhibit-read-only t)
             (new-str (emms-lyrics-sync-display--format-time elapsed-s)))
         (save-excursion
-          (let ((start (marker-position emms-lyrics-sync-display--elapsed-marker))
-                (end   (marker-position emms-lyrics-sync-display--elapsed-end-marker)))
+          (let ((start (marker-position
+                        emms-lyrics-sync-display--elapsed-marker))
+                (end   (marker-position
+                        emms-lyrics-sync-display--elapsed-end-marker)))
             (goto-char start)
             (delete-region start end)
             (insert (propertize new-str
