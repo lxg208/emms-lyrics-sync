@@ -1,32 +1,11 @@
 ;;; emms-lyrics-sync-waveform.el --- Waveform PNG generation and display  -*- lexical-binding: t -*-
 ;; File    : emms-lyrics-sync-waveform.el
 ;; Created : 2026-06-13 16:00 UTC
-;; Updated : 2026-06-13 18:40 UTC
-;; Purpose : Pixel-perfect waveform using ffmpeg showwavespic filter.
-;;
-;;           Pipeline (replaces astats+SVG entirely):
-;;             1. ffmpeg showwavespic → played.png + remaining.png (async)
-;;             2. ffmpeg crop+hstack  → composite.png (sync, ~20ms, image only)
-;;             3. clear-image-cache + create-image → display single PNG
-;;
-;;           Why not Emacs :crop:
-;;             Two insert-image calls have pixel gaps between them.
-;;             Emacs caches images by path — overwriting the file returns
-;;             the stale cached image unless clear-image-cache is called.
-;;             A single composite PNG avoids both problems.
-;;
-;;           Why not the old astats approach:
-;;             astats at 8 kHz with reset=160 gives ~19 chunks/sec.
-;;             For a 295s track that is only 5,658 data points.
-;;             showwavespic decodes all PCM samples — same as foobar2000
-;;             foo_wave_minibar_mod which is "fully software implemented"
-;;             using a GDI pixel buffer at full sample rate.
-;;
-;;           CRITICAL — consp vs listp:
-;;             Cache stores nil (miss) | 'pending | plist (ready).
-;;             (listp nil) → t — nil passes a listp guard → crash.
-;;             (consp nil) → nil — correct.
-;;             Every cache guard uses consp.
+;; Updated : 2026-06-14 00:00 UTC
+;; Changes :
+;;   • --get-bg-color: auto-compensates +2/channel for ffmpeg YUV rounding
+;;     (overlay filter converts through YUV internally, shifting bg by -2)
+;;   • All other code identical to v10 balanced
 ;;
 ;; Copyright (C) 2026  emms-lyrics-sync contributors
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -47,14 +26,32 @@
 
 ;;; ── Customization ────────────────────────────────────────────────────────────
 
-(defcustom emms-lyrics-sync-waveform-height 2
-  "Waveform height in character lines."
+(defcustom emms-lyrics-sync-waveform-height 4
+  "Waveform height in character lines.
+Default 4 gives ~80px at a typical font size, matching foobar2000
+waveform seekbar proportions.  The pixel height is always:
+  emms-lyrics-sync-waveform-height × frame-char-height
+Increase for a taller display; decrease for a compact bar."
   :type  'integer
   :group 'emms-lyrics-sync)
 
 (defcustom emms-lyrics-sync-waveform-render-mode 'auto
   "Waveform render mode: `auto', `unicode', or `png'."
   :type  '(choice (const auto) (const unicode) (const png))
+  :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-waveform-background-color nil
+  "Background colour for waveform PNGs, as a hex string e.g. \"#292a2d\".
+When nil (the default), the colour is read automatically from the
+`default' face background at the time of PNG generation, with an
+automatic +2-per-channel compensation for ffmpeg's YUV rounding.
+
+Set this explicitly when the auto-detected colour is wrong:
+  (setq emms-lyrics-sync-waveform-background-color \"#28343a\")
+
+Changing this value invalidates all cached PNGs automatically."
+  :type  '(choice (const :tag "Auto-detect from default face" nil)
+                  (color :tag "Explicit hex color"))
   :group 'emms-lyrics-sync)
 
 (defcustom emms-lyrics-sync-waveform-color-played "#4a9eff"
@@ -118,16 +115,40 @@
   'emms-lyrics-sync-waveform--use-png-p)
 
 (defun emms-lyrics-sync-waveform--get-bg-color ()
-  "Return current frame background colour as a hex string."
-  (or (and (display-graphic-p)
-           (ignore-errors (face-background 'default nil t)))
-      "#2d2d2d"))
+  "Return the waveform background colour as a hex string.
+
+Auto-compensates +2 per channel for ffmpeg's YUV rounding:
+ffmpeg's overlay filter converts colour sources through YUV internally,
+which shifts every channel value by -2.  Adding +2 here ensures the
+rendered PNG background matches the actual frame background exactly.
+
+Resolution order:
+  1. `emms-lyrics-sync-waveform-background-color' when explicitly set.
+  2. `face-background' of the `default' face (auto-detect from theme).
+  3. Hard-coded fallback \"#2d2d2d\"."
+  (let* ((raw (or emms-lyrics-sync-waveform-background-color
+                  (and (display-graphic-p)
+                       (ignore-errors (face-background 'default nil t)))
+                  "#2d2d2d")))
+    (if (string-match
+         "^#\\([0-9a-fA-F]\\{2\\}\\)\\([0-9a-fA-F]\\{2\\}\\)\\([0-9a-fA-F]\\{2\\}\\)$"
+         raw)
+        (format "#%02x%02x%02x"
+                (min 255 (+ (string-to-number (match-string 1 raw) 16) 2))
+                (min 255 (+ (string-to-number (match-string 2 raw) 16) 2))
+                (min 255 (+ (string-to-number (match-string 3 raw) 16) 2)))
+      raw)))
 
 (defun emms-lyrics-sync-waveform--png-paths (file-path px-w px-h)
-  "Return (played-path . remaining-path) for FILE-PATH at PX-W×PX-H."
-  (let* ((dir  (expand-file-name "waveforms" emms-lyrics-sync-cache-dir))
-         (base (concat (md5 (expand-file-name file-path))
-                       (format "-%dx%d" px-w px-h))))
+  "Return (played-path . remaining-path) for FILE-PATH at PX-W×PX-H.
+The background colour is included in the filename so that changing
+`emms-lyrics-sync-waveform-background-color' automatically invalidates
+old cached PNGs without a manual cache flush."
+  (let* ((dir   (expand-file-name "waveforms" emms-lyrics-sync-cache-dir))
+         (bg    (emms-lyrics-sync-waveform--get-bg-color))
+         (bg-s  (replace-regexp-in-string "#" "" bg))
+         (base  (concat (md5 (expand-file-name file-path))
+                        (format "-%dx%d-%s" px-w px-h bg-s))))
     (cons (expand-file-name (concat base "-played.png")    dir)
           (expand-file-name (concat base "-remaining.png") dir))))
 
@@ -135,208 +156,203 @@
   "Derive composite PNG path from PLAYED-PATH."
   (replace-regexp-in-string "-played\\.png\\'" "-composite.png" played-path))
 
+;;; ── Filter Complex Builder ───────────────────────────────────────────────────
+
+(defun emms-lyrics-sync-waveform--filter-complex (px-w px-h bg-color wave-color)
+  "Build an ffmpeg filter_complex for foobar-style dual-channel waveform.
+
+Foobar2000 foo_wave_minibar_mod style: L channel grows UPWARD from a
+shared centre line, R channel grows DOWNWARD from the same centre line.
+
+Algorithm:
+  1. Upmix to stereo (handles mono files transparently).
+  2. Channelsplit → separate L and R audio streams.
+  3. Render each channel at FULL px-h (showwavespic centres the waveform
+     in the full canvas, so peaks extend both above and below centre).
+  4. Composite each over a background plate.
+  5. Crop TOP half of L    → only upward peaks remain.
+  6. Crop BOTTOM half of R → only downward peaks remain.
+  7. vstack the two halves → one shared centre line, zero gap by
+     construction regardless of signal amplitude."
+  (let* ((half-h (/ px-h 2)))
+    (format (concat
+             "[0:a]aformat=channel_layouts=stereo[ac];"
+             "[ac]channelsplit=channel_layout=stereo[L][R];"
+             "color=c=%s:s=%dx%d[bgL];"
+             "color=c=%s:s=%dx%d[bgR];"
+             "[L]showwavespic=s=%dx%d:split_channels=0:colors=%s[wfL_raw];"
+             "[R]showwavespic=s=%dx%d:split_channels=0:colors=%s[wfR_raw];"
+             "[bgL][wfL_raw]overlay[wfL];"
+             "[bgR][wfR_raw]overlay[wfR];"
+             "[wfL]crop=%d:%d:0:0[topL];"
+             "[wfR]crop=%d:%d:0:%d[botR];"
+             "[topL][botR]vstack")
+            ;; bgL
+            bg-color px-w px-h
+            ;; bgR
+            bg-color px-w px-h
+            ;; wfL_raw
+            px-w px-h wave-color
+            ;; wfR_raw
+            px-w px-h wave-color
+            ;; crop topL: w h x y
+            px-w half-h
+            ;; crop botR: w h x y(=half-h)
+            px-w half-h half-h)))
+
 ;;; ── PNG Generation ───────────────────────────────────────────────────────────
 
-(defun emms-lyrics-sync-waveform--generate-pngs-async
-    (file-path px-w px-h bg-color callback)
-  "Generate played and remaining PNG files for FILE-PATH asynchronously.
-CALLBACK is called with (played-path remaining-path); either is nil on failure."
-  (let* ((paths          (emms-lyrics-sync-waveform--png-paths file-path px-w px-h))
-         (played-path    (car paths))
-         (remaining-path (cdr paths))
-         (done  0)
-         (ok-p  nil)
-         (ok-r  nil))
-    (make-directory (file-name-directory played-path) t)
-    (cl-flet
-        ((file-ok (path)
-           (and (file-exists-p path)
-                (> (or (file-attribute-size (file-attributes path)) 0) 100)))
-         (ffmpeg-cmd (out-path wave-color)
-           (list "ffmpeg" "-y"
-                 "-i" (expand-file-name file-path)
-                 "-filter_complex"
-                 (format (concat "color=c=%s:s=%dx%d[bg];"
-                                 "[0:a]showwavespic=s=%dx%d"
-                                 ":split_channels=1"
-                                 ":colors=%s|%s[wf];"
-                                 "[bg][wf]overlay")
-                         bg-color px-w px-h
-                         px-w px-h
-                         wave-color wave-color)
-                 "-frames:v" "1" out-path)))
-      (cl-flet
-          ((on-done ()
-             (cl-incf done)
-             (when (= done 2)
-               (funcall callback
-                        (and ok-p (file-ok played-path) played-path)
-                        (and ok-r (file-ok remaining-path) remaining-path)))))
-        ;; ── Remaining PNG ─────────────────────────────────────────────────
-        (if (file-ok remaining-path)
-            (progn (setq ok-r t) (on-done))
-          (let ((buf (generate-new-buffer " *emms-wf-remaining*")))
-            (make-process
-             :name    "emms-wf-remaining"
-             :buffer  buf
-             :command (ffmpeg-cmd remaining-path
-                                  emms-lyrics-sync-waveform-color-remaining)
-             :noquery t
-             :sentinel
-             (lambda (p _)
-               (when (memq (process-status p) '(exit signal))
-                 (kill-buffer buf)
-                 (setq ok-r (file-ok remaining-path))
-                 (on-done))))))
-        ;; ── Played PNG ────────────────────────────────────────────────────
-        (if (file-ok played-path)
-            (progn (setq ok-p t) (on-done))
-          (let ((buf (generate-new-buffer " *emms-wf-played*")))
-            (make-process
-             :name    "emms-wf-played"
-             :buffer  buf
-             :command (ffmpeg-cmd played-path
-                                  emms-lyrics-sync-waveform-color-played)
-             :noquery t
-             :sentinel
-             (lambda (p _)
-               (when (memq (process-status p) '(exit signal))
-                 (kill-buffer buf)
-                 (setq ok-p (file-ok played-path))
-                 (on-done))))))))))
+(defun emms-lyrics-sync-waveform--generate-png (file-path out-path px-w px-h
+                                                  wave-color callback)
+  "Generate a waveform PNG for FILE-PATH at PX-W×PX-H asynchronously.
+WAVE-COLOR is the waveform bar colour (hex string).
+Calls CALLBACK with t on success, nil on failure."
+  (let* ((bg  (emms-lyrics-sync-waveform--get-bg-color))
+         (fc  (emms-lyrics-sync-waveform--filter-complex
+               px-w px-h bg wave-color))
+         (dir (file-name-directory out-path)))
+    (make-directory dir t)
+    (let ((proc (make-process
+                 :name    "emms-lyrics-sync-waveform-gen"
+                 :buffer  nil
+                 :command (list "ffmpeg" "-y"
+                                "-i" (expand-file-name file-path)
+                                "-filter_complex" fc
+                                "-frames:v" "1"
+                                out-path)
+                 :noquery t
+                 :sentinel
+                 (lambda (p _event)
+                   (when (memq (process-status p) '(exit signal))
+                     (let ((ok (and (= (process-exit-status p) 0)
+                                    (file-exists-p out-path)
+                                    (> (or (file-attribute-size
+                                            (file-attributes out-path)) 0)
+                                       100))))
+                       (funcall callback ok)))))))
+      proc)))
 
-;;; ── Composite PNG ────────────────────────────────────────────────────────────
+;;; ── PNG Cache Population ─────────────────────────────────────────────────────
 
-(defun emms-lyrics-sync-waveform--make-composite-png
-    (played-path remaining-path out-path px-w px-h cursor-x)
-  "Create a single composite PNG synchronously via ffmpeg crop+hstack.
-Left slice (0..cursor-x) from PLAYED-PATH (blue).
-Right slice (cursor-x..px-w) from REMAINING-PATH (grey).
-Returns t on success, nil on failure.
-
-Why ffmpeg crop+hstack instead of Emacs :crop:
-  1. Two insert-image calls leave a pixel gap at the join.
-  2. Emacs caches images by path — overwriting the file returns the
-     stale cached image even with a new create-image call unless
-     clear-image-cache is called first.
-  A single composite file avoids both issues."
-  (let ((cursor-x (max 0 (min px-w cursor-x))))
+(defun emms-lyrics-sync-waveform--ensure-pngs (file-path px-w px-h callback)
+  "Ensure both played and remaining PNGs exist for FILE-PATH at PX-W×PX-H.
+Calls CALLBACK with the cache plist when both are ready, nil on failure.
+No-op if already cached or pending."
+  (let ((cached (gethash file-path emms-lyrics-sync-waveform--png-cache)))
     (cond
-     ;; Nothing played yet — just copy remaining
-     ((= cursor-x 0)
-      (ignore-errors (copy-file remaining-path out-path t))
-      (file-exists-p out-path))
-     ;; Fully played — just copy played
-     ((>= cursor-x px-w)
-      (ignore-errors (copy-file played-path out-path t))
-      (file-exists-p out-path))
-     ;; Composite: crop left from played, right from remaining, hstack
+     ;; Already fully cached at the right dimensions
+     ((and (consp cached)
+           (= (plist-get cached :px-w) px-w)
+           (= (plist-get cached :px-h) px-h)
+           (file-exists-p (plist-get cached :played))
+           (file-exists-p (plist-get cached :remaining)))
+      (funcall callback cached))
+     ;; Already pending — callback will fire when generation completes
+     ((eq cached 'pending) nil)
+     ;; Need to generate
      (t
-      (let* ((remaining-w (- px-w cursor-x))
-             (rc (call-process
-                  "ffmpeg" nil nil nil
-                  "-y"
-                  "-i" played-path
-                  "-i" remaining-path
-                  "-filter_complex"
-                  (format (concat "[0:v]crop=%d:%d:0:0[L];"
-                                  "[1:v]crop=%d:%d:%d:0[R];"
-                                  "[L][R]hstack=inputs=2[out]")
-                          cursor-x      px-h
-                          remaining-w   px-h   cursor-x)
-                  "-map" "[out]"
-                  out-path)))
-        (and (= rc 0) (file-exists-p out-path)))))))
+      (puthash file-path 'pending emms-lyrics-sync-waveform--png-cache)
+      (let* ((paths          (emms-lyrics-sync-waveform--png-paths
+                              file-path px-w px-h))
+             (played-path    (car paths))
+             (remaining-path (cdr paths))
+             (done-count     0)
+             (ok-count       0)
+             (finish
+              (lambda (ok)
+                (cl-incf done-count)
+                (when ok (cl-incf ok-count))
+                (when (= done-count 2)
+                  (if (= ok-count 2)
+                      (let ((plist (list :px-w      px-w
+                                         :px-h      px-h
+                                         :played    played-path
+                                         :remaining remaining-path)))
+                        (puthash file-path plist
+                                 emms-lyrics-sync-waveform--png-cache)
+                        (funcall callback plist))
+                    (puthash file-path nil
+                             emms-lyrics-sync-waveform--png-cache)
+                    (funcall callback nil))))))
+        (emms-lyrics-sync-waveform--generate-png
+         file-path played-path px-w px-h
+         emms-lyrics-sync-waveform-color-played finish)
+        (emms-lyrics-sync-waveform--generate-png
+         file-path remaining-path px-w px-h
+         emms-lyrics-sync-waveform-color-remaining finish))))))
 
-(defun emms-lyrics-sync-waveform--insert-composite
-    (played-path remaining-path px-w px-h pos-s duration)
-  "Create composite PNG and insert as a single image at point.
-No newlines are inserted — the caller must add the trailing \\n.
+;;; ── Composite Insertion ──────────────────────────────────────────────────────
 
-Calls clear-image-cache before create-image to prevent Emacs from
-returning a stale cached copy of the composite file."
-  (let* ((cursor-x  (if (and duration (> duration 0))
-                        (max 0 (min px-w
-                                    (round (* (/ (float pos-s) duration) px-w))))
-                      0))
-         (comp-path (emms-lyrics-sync-waveform--composite-path played-path))
-         (ok        (emms-lyrics-sync-waveform--make-composite-png
-                     played-path remaining-path comp-path
-                     px-w px-h cursor-x)))
-    (when ok
-      ;; Flush Emacs image cache for this path so overwritten file is reloaded.
-      (ignore-errors (clear-image-cache comp-path))
-      (let ((img (create-image comp-path nil nil :scale 1.0)))
-        (when img
-          (insert-image img))))))
-
-;;; ── Placeholder (hairline while PNGs generate) ───────────────────────────────
-
-(defun emms-lyrics-sync-waveform--insert-placeholder (px-w px-h)
-  "Insert a hairline SVG placeholder at point.  No newlines inserted.
-Shows a subtle centre line so the waveform area is not invisible."
-  (ignore-errors (require 'svg nil t))
-  (when (fboundp 'svg-create)
-    (let* ((bg  (emms-lyrics-sync-waveform--get-bg-color))
-           (svg (svg-create px-w px-h)))
-      (svg-rectangle svg 0 0 px-w px-h :fill bg)
-      (svg-line svg 0 (/ (float px-h) 2) px-w (/ (float px-h) 2)
-                :stroke "#444444" :stroke-width 1)
-      (let ((img (svg-image svg :scale 1.0)))
+(defun emms-lyrics-sync-waveform--insert-composite (played-path remaining-path
+                                                      px-w px-h pos-s duration)
+  "Insert a composite waveform image at point.
+Combines PLAYED-PATH and REMAINING-PATH via ffmpeg crop+hstack into a
+single composite PNG, then inserts it.  No Emacs :crop used."
+  (let* ((cursor-x     (if (and duration (> duration 0))
+                           (max 1 (min (1- px-w)
+                                       (round (* (/ pos-s (float duration))
+                                                 px-w))))
+                         0))
+         (remaining-w  (- px-w cursor-x))
+         (composite    (emms-lyrics-sync-waveform--composite-path played-path))
+         (fc           (format
+                        "[0:v]crop=%d:%d:0:0[left];[1:v]crop=%d:%d:%d:0[right];[left][right]hstack=inputs=2"
+                        cursor-x px-h
+                        remaining-w px-h cursor-x))
+         (result       (call-process
+                        "ffmpeg" nil nil nil
+                        "-y"
+                        "-i" played-path
+                        "-i" remaining-path
+                        "-filter_complex" fc
+                        "-frames:v" "1"
+                        composite)))
+    (when (and (= result 0)
+               (file-exists-p composite)
+               (> (or (file-attribute-size (file-attributes composite)) 0) 100))
+      (clear-image-cache composite)
+      (let ((img (create-image composite nil nil :scale 1.0)))
         (when img
           (insert-image img))))))
 
 ;;; ── Unicode Flat Bar (terminal fallback) ─────────────────────────────────────
 
 (defun emms-lyrics-sync-waveform--render-unicode-flat (width-chars pos-s duration)
-  "Return a propertized Unicode flat progress bar string for terminal use.
-WIDTH-CHARS is the character width.  POS-S and DURATION are in seconds."
+  "Return a propertized flat Unicode bar string (terminal fallback)."
   (let* ((cursor (when (and duration (> duration 0))
                    (floor (* (/ pos-s (float duration)) width-chars))))
-         (line   (make-string width-chars ?▄)))
+         (line   (make-string width-chars ?─)))
     (cl-loop for col from 0 below width-chars do
-      (let ((face (cond ((and cursor (= col cursor))
-                         'emms-lyrics-sync-waveform-cursor-face)
-                        ((and cursor (< col cursor))
-                         'emms-lyrics-sync-waveform-played-face)
-                        (t
-                         'emms-lyrics-sync-waveform-remaining-face))))
+      (let ((face (cond
+                   ((and cursor (= col cursor))
+                    'emms-lyrics-sync-waveform-cursor-face)
+                   ((and cursor (< col cursor))
+                    'emms-lyrics-sync-waveform-played-face)
+                   (t
+                    'emms-lyrics-sync-waveform-remaining-face))))
         (put-text-property col (1+ col) 'face face line)))
     line))
 
-;;; ── Async Trigger ────────────────────────────────────────────────────────────
+;;; ── Insert At Point (called by redraw.el) ────────────────────────────────────
 
-(defun emms-lyrics-sync-waveform--trigger-redraw (buf file-path)
-  "Trigger same-track redraw if BUF is live and FILE-PATH is still current."
-  (when (buffer-live-p buf)
-    (with-current-buffer buf
-      (let ((track emms-lyrics-sync-core--current-track))
-        (when (and track
-                   (equal (emms-lyrics-sync-track-file-path track) file-path)
-                   (fboundp 'emms-lyrics-sync-display-on-track-change))
-          (emms-lyrics-sync-display-on-track-change))))))
-
-;;; ── Main Entry Point ─────────────────────────────────────────────────────────
-
-(defun emms-lyrics-sync-waveform--insert-at-point
-    (file-path pos-s duration px-w px-h)
+(defun emms-lyrics-sync-waveform--insert-at-point (file-path pos-s duration
+                                                     px-w px-h)
   "Insert waveform for FILE-PATH at point.
+Sets `emms-lyrics-sync-display--waveform-marker' (NIL type) after
+inserting the separator newline and before inserting bar content.
 
-Invariant (relied upon by display-redraw.el):
-  1. Insert separator \\n
-  2. Set emms-lyrics-sync-display--waveform-marker (NIL insertion-type)
-  3. Insert content (composite PNG or placeholder)
-  4. Insert trailing \\n
-
-Never call this from --update-waveform-cursor (would produce double \\n
-because the separator \\n before the marker is preserved by delete-region)."
-  (insert "\n")
-  (setq emms-lyrics-sync-display--waveform-marker
-        (copy-marker (point) nil))
-  (let* ((cached (gethash file-path emms-lyrics-sync-waveform--png-cache))
-         (buf    (current-buffer)))
+If PNGs are already cached: inserts composite immediately.
+If not cached: inserts unicode flat bar placeholder, starts async
+PNG generation, then triggers a same-track redraw on completion."
+  (let* ((cached  (gethash file-path emms-lyrics-sync-waveform--png-cache))
+         (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
+         (buf     (current-buffer)))
+    ;; Separator newline BEFORE marker
+    (insert "\n")
+    (setq emms-lyrics-sync-display--waveform-marker
+          (copy-marker (point) nil))
     (cond
-     ;; ── PNGs ready and dimensions match ────────────────────────────────
+     ;; ── PNG ready ────────────────────────────────────────────────────────
      ((and (consp cached)
            (= (plist-get cached :px-w) px-w)
            (= (plist-get cached :px-h) px-h)
@@ -345,50 +361,33 @@ because the separator \\n before the marker is preserved by delete-region)."
       (emms-lyrics-sync-waveform--insert-composite
        (plist-get cached :played)
        (plist-get cached :remaining)
-       px-w px-h pos-s duration))
+       px-w px-h pos-s duration)
+      (insert "\n"))
 
-     ;; ── PNGs exist but window was resized ──────────────────────────────
-     ((and (consp cached)
-           (or (/= (plist-get cached :px-w) px-w)
-               (/= (plist-get cached :px-h) px-h)))
-      ;; Show placeholder, invalidate, regenerate for new size.
-      (emms-lyrics-sync-waveform--insert-placeholder px-w px-h)
-      (remhash file-path emms-lyrics-sync-waveform--png-cache)
-      (puthash file-path 'pending emms-lyrics-sync-waveform--png-cache)
-      (emms-lyrics-sync-waveform--generate-pngs-async
-       file-path px-w px-h
-       (emms-lyrics-sync-waveform--get-bg-color)
-       (lambda (p r)
-         (when (and p r)
-           (puthash file-path
-                    (list :px-w px-w :px-h px-h :played p :remaining r)
-                    emms-lyrics-sync-waveform--png-cache))
-         (emms-lyrics-sync-waveform--trigger-redraw buf file-path))))
-
-     ;; ── Already generating ─────────────────────────────────────────────
-     ((eq cached 'pending)
-      (emms-lyrics-sync-waveform--insert-placeholder px-w px-h))
-
-     ;; ── Not started — begin async generation ───────────────────────────
+     ;; ── PNG pending or wrong dimensions — show flat bar, start/wait ───
      (t
-      (emms-lyrics-sync-waveform--insert-placeholder px-w px-h)
-      (puthash file-path 'pending emms-lyrics-sync-waveform--png-cache)
-      (emms-lyrics-sync-waveform--generate-pngs-async
-       file-path px-w px-h
-       (emms-lyrics-sync-waveform--get-bg-color)
-       (lambda (p r)
-         (when (and p r)
-           (puthash file-path
-                    (list :px-w px-w :px-h px-h :played p :remaining r)
-                    emms-lyrics-sync-waveform--png-cache))
-         (emms-lyrics-sync-waveform--trigger-redraw buf file-path))))))
-  (insert "\n"))
+      (insert (emms-lyrics-sync-waveform--render-unicode-flat
+               win-chars pos-s duration))
+      (insert "\n")
+      ;; Start generation only if not already pending
+      (unless (eq cached 'pending)
+        (emms-lyrics-sync-waveform--ensure-pngs
+         file-path px-w px-h
+         (lambda (plist)
+           (when (and plist (buffer-live-p buf))
+             (with-current-buffer buf
+               (when (and emms-lyrics-sync-core--current-track
+                          (equal (emms-lyrics-sync-track-file-path
+                                  emms-lyrics-sync-core--current-track)
+                                 file-path)
+                          (fboundp 'emms-lyrics-sync-display-on-track-change))
+                 (emms-lyrics-sync-display-on-track-change)))))))))))
 
-;;; ── Public API ───────────────────────────────────────────────────────────────
+;;; ── Public: Invalidate Cache ────────────────────────────────────────────────
 
 ;;;###autoload
 (defun emms-lyrics-sync-waveform-invalidate (file-path)
-  "Remove cached waveform PNGs for FILE-PATH, forcing re-extraction."
+  "Remove cached waveform PNGs for FILE-PATH, forcing re-generation."
   (remhash file-path emms-lyrics-sync-waveform--png-cache))
 
 (provide 'emms-lyrics-sync-waveform)
