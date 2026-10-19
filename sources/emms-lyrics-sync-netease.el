@@ -143,37 +143,45 @@ when artist information is unavailable."
             emms-lyrics-sync-netease-search-limit)))
 
 (defun emms-lyrics-sync-netease--best-id (body want-artist want-title)
-  "Parse NetEase search response BODY; return best-matching track ID or nil.
-Scores each candidate in the result list and returns the ID of the one
-exceeding `emms-lyrics-sync-netease-min-score', or nil if none qualifies."
+  "Parse NetEase search response BODY; return best-matching track ID or nil."
   (condition-case err
-      (let* ((obj      (json-parse-string body :object-type 'alist
-                                               :null-object nil
-                                               :false-object nil))
-             (result   (cdr (assq 'result obj)))
-             (songs    (cdr (assq 'songs  result))))
-        (when (and songs (> (length songs) 0))
+      (let* ((obj    (json-parse-string body :object-type 'alist
+                                              :null-object nil
+                                              :false-object nil))
+             (result (cdr (assq 'result obj)))
+             (songs  (cdr (assq 'songs  result))))
+        (when (and (vectorp songs) (> (length songs) 0))
           (let ((best-id    nil)
-                (best-score -1.0))
-            (cl-loop for song across songs do
-              (let* ((id      (cdr (assq 'id   song)))
-                     (name    (cdr (assq 'name song)))
-                     (artists (cdr (assq 'artists song)))
-                     ;; artists is an array; join first names for matching
-                     (artist-str
-                      (when (and artists (> (length artists) 0))
-                        (mapconcat
-                         (lambda (a) (or (cdr (assq 'name a)) ""))
-                         artists " ")))
-                     (score (emms-lyrics-sync-netease--score
-                             artist-str name want-artist want-title)))
+                (best-score -1.0)
+                (n          (length songs)))
+            (dotimes (i n)
+              (let* ((song       (aref songs i))
+                     (id         (cdr (assq 'id song)))
+                     (name       (cdr (assq 'name song)))
+                     (artists    (cdr (assq 'artists song)))
+                     (artist-str (and (vectorp artists)
+                                      (> (length artists) 0)
+                                      (mapconcat
+                                       (lambda (a)
+                                         (or (cdr (assq 'name a)) ""))
+                                       artists " ")))
+                     (score      (emms-lyrics-sync-netease--score
+                                  artist-str name want-artist want-title)))
                 (when (> score best-score)
                   (setq best-score score
                         best-id    id))))
+            (when emms-lyrics-sync-verbose
+              (message "netease: best score %.2f (threshold %.2f)"
+                       best-score emms-lyrics-sync-netease-min-score))
             (when (>= best-score emms-lyrics-sync-netease-min-score)
               best-id))))
     (json-parse-error
-     (message "emms-lyrics-sync-netease: search JSON parse error: %S" err)
+     (when emms-lyrics-sync-verbose
+       (message "emms-lyrics-sync-netease: search JSON parse error: %S" err))
+     nil)
+    (error
+     (when emms-lyrics-sync-verbose
+       (message "emms-lyrics-sync-netease: search parse error: %S" err))
      nil)))
 
 ;;; ── Step 2: Lyric Fetch ──────────────────────────────────────────────────────
@@ -185,18 +193,27 @@ exceeding `emms-lyrics-sync-netease-min-score', or nil if none qualifies."
           (number-to-string track-id)))
 
 (defun emms-lyrics-sync-netease--parse-lyric (body)
-  "Parse a NetEase lyric response BODY; return `emms-lyrics-sync-result' or nil."
+  "Parse a NetEase lyric response BODY; return `emms-lyrics-sync-result' or nil.
+
+Key lookup uses `assq' with quoted symbols because `json-parse-string'
+with `:object-type \\='alist' produces SYMBOL keys (verified empirically:
+the search parser in this same file uses `assq' and finds results while
+`assoc' with strings silently returns nil).  This is consistent with
+the qqmusic, lyricsovh, and lrclib parsers."
   (condition-case err
       (let* ((obj      (json-parse-string body :object-type 'alist
-                                               :null-object nil
+                                               :null-object  nil
                                                :false-object nil))
-             (nolyric  (cdr (assoc "nolyric"     obj)))
+             ;; All lookups use assq with symbol keys — see docstring.
+             (nolyric  (cdr (assq 'nolyric     obj)))
              (uncoll   (cdr (assq 'uncollected obj)))
-             (lrc-obj  (cdr (assoc "lrc"         obj)))
-             (lrc-str  (and lrc-obj (cdr (assoc "lyric" lrc-obj)))))
+             (lrc-obj  (cdr (assq 'lrc         obj)))
+             (lrc-str  (and lrc-obj (cdr (assq 'lyric lrc-obj)))))
+        (when emms-lyrics-sync-verbose
+          (message "netease lyric: nolyric=%S uncollected=%S lrc-len=%S"
+                   nolyric uncoll (and lrc-str (length lrc-str))))
         (cond
-         ((or nolyric uncoll)
-          nil)
+         ((or nolyric uncoll) nil)
          ((and (stringp lrc-str)
                (not (string-empty-p (string-trim lrc-str))))
           (emms-lyrics-sync-result--make
@@ -205,7 +222,8 @@ exceeding `emms-lyrics-sync-netease-min-score', or nil if none qualifies."
            :content lrc-str))
          (t nil)))
     (json-parse-error
-     (message "emms-lyrics-sync-netease: lyric JSON parse error: %S" err)
+     (when emms-lyrics-sync-verbose
+       (message "emms-lyrics-sync-netease: lyric JSON parse error: %S" err))
      nil)))
 
 ;;; ── Source Entry Point ───────────────────────────────────────────────────────
