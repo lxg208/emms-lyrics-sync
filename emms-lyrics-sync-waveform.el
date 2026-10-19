@@ -351,14 +351,8 @@ falls back to a Unicode flat bar so the waveform line is never blank."
 (defun emms-lyrics-sync-waveform--insert-at-point (file-path pos-s duration
                                                      px-w px-h)
   "Insert waveform for FILE-PATH at point.
-
-The waveform begins on the line immediately following the lyrics
-section — no blank separator line is inserted.  The waveform's own
-background provides visual separation, and the extra line would push
-the bar off-screen on shorter windows.
-
-Sets `emms-lyrics-sync-display--waveform-marker' (NIL type) at the
-start of the waveform content before inserting it.
+Sets `emms-lyrics-sync-display--waveform-marker' (NIL type) after
+inserting the separator newline and before inserting bar content.
 
 If PNGs are already cached: inserts composite immediately.
 If not cached: inserts unicode flat bar placeholder, starts async
@@ -366,7 +360,8 @@ PNG generation, then triggers a same-track redraw on completion."
   (let* ((cached  (gethash file-path emms-lyrics-sync-waveform--png-cache))
          (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
          (buf     (current-buffer)))
-    ;; Marker at point — waveform begins here, on the line right after lyrics
+    ;; Separator newline BEFORE marker
+    (insert "\n")
     (setq emms-lyrics-sync-display--waveform-marker
           (copy-marker (point) nil))
     (cond

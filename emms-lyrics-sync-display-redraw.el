@@ -56,8 +56,9 @@ which inserts: separator \\n → waveform-marker (NIL) → content → trailing 
        fp pos-s duration px-w px-h))
      ;; ── Unicode flat bar fallback (terminal) ──────────────────────────────
      ((fboundp 'emms-lyrics-sync-waveform--render-unicode-flat)
+      (insert "\n")
       (setq emms-lyrics-sync-display--waveform-marker
-	    (copy-marker (point) nil))
+            (copy-marker (point) nil))
       (insert (emms-lyrics-sync-waveform--render-unicode-flat
                win-chars pos-s duration))
       (insert "\n")))))
