@@ -34,18 +34,13 @@
 Invariant: delegates entirely to `emms-lyrics-sync-waveform--insert-at-point'
 which inserts: separator \\n → waveform-marker (NIL) → content → trailing \\n."
   (let* ((track     emms-lyrics-sync-core--current-track)
-         (fp        (and track (emms-lyrics-sync-track-file-path track)))
-         (duration  (and track (emms-lyrics-sync-track-duration track)))
-         (char-w    (frame-char-width))
-         (char-h    (frame-char-height))
-         (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
-	 (px-w  (let ((w (* win-chars char-w))) (if (oddp w) (1+ w) w)))
-	 (px-h (let* ((raw (* (if (boundp 'emms-lyrics-sync-waveform-height)
-				  emms-lyrics-sync-waveform-height 2)
-			      char-h))
-		      (rem (mod raw 4)))
-		 (if (zerop rem) raw (+ raw (- 4 rem)))))
-         (pos-s     (/ (float pos-ms) 1000.0)))
+	 (fp        (and track (emms-lyrics-sync-track-file-path track)))
+	 (duration  (and track (emms-lyrics-sync-track-duration track)))
+	 (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
+	 (dims      (emms-lyrics-sync-waveform--target-dimensions win-chars))
+	 (px-w      (car dims))
+	 (px-h      (cdr dims))
+	 (pos-s     (/ (float pos-ms) 1000.0)))
     (cond
      ;; ── PNG mode ─────────────────────────────────────────────────────────
      ((and fp
@@ -73,7 +68,13 @@ Marker invariant:
   delete-region removes from wf-start to (point-max), preserving the
   separator \\n that sits BEFORE wf-start.  We then insert new content
   followed by \\n.  We must NOT call --insert-at-point here because that
-  function inserts its own separator \\n which would produce a double \\n.
+  function inserts its own separator \\n which would produce a double
+  \\n.
+
+  The fast path calls --composite-at-point with a precomputed cursor-x
+  and inserts a trailing \n.  We must NOT call --insert-at-point here
+  because that function inserts its own separator \n which would produce
+  a double \n.
 
 Cache guard: uses (consp cached) not (listp cached).
   (listp nil) → t — nil passes, (plist-get nil :px-w) → nil → crash.
@@ -91,18 +92,13 @@ Cache guard: uses (consp cached) not (listp cached).
       (when (consp cached)
         (with-current-buffer emms-lyrics-sync-display--buffer
           (let* ((inhibit-read-only t)
-                 (wf-start  (marker-position
-                             emms-lyrics-sync-display--waveform-marker))
-                 (char-w    (frame-char-width))
-                 (char-h    (frame-char-height))
-                 (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
-		 (px-w  (let ((w (* win-chars char-w))) (if (oddp w) (1+ w) w)))
-		 (px-h (let* ((raw (* (if (boundp 'emms-lyrics-sync-waveform-height)
-					  emms-lyrics-sync-waveform-height 2)
-				      char-h))
-			      (rem (mod raw 4)))
-			 (if (zerop rem) raw (+ raw (- 4 rem)))))
-                 (pos-s     (/ (float pos-ms) 1000.0)))
+		 (wf-start  (marker-position
+			     emms-lyrics-sync-display--waveform-marker))
+		 (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
+		 (dims      (emms-lyrics-sync-waveform--target-dimensions win-chars))
+		 (px-w      (car dims))
+		 (px-h      (cdr dims))
+		 (pos-s     (/ (float pos-ms) 1000.0)))
             (when (and (integerp wf-start)
                        (<= wf-start (point-max)))
               (delete-region wf-start (point-max))
@@ -115,12 +111,16 @@ Cache guard: uses (consp cached) not (listp cached).
                      (= (plist-get cached :px-h) px-h)
                      (file-exists-p (plist-get cached :played))
                      (file-exists-p (plist-get cached :remaining))
-                     (fboundp 'emms-lyrics-sync-waveform--insert-composite))
-                ;; --insert-composite inserts image only (no newlines)
-                (emms-lyrics-sync-waveform--insert-composite
-                 (plist-get cached :played)
-                 (plist-get cached :remaining)
-                 px-w px-h pos-s duration)
+                     (fboundp 'emms-lyrics-sync-waveform--composite-at-point))
+                (let ((cursor-x (if (and duration (> duration 0))
+                                    (max 1 (min (1- px-w)
+                                                (round (* (/ pos-s (float duration))
+                                                          px-w))))
+                                  0)))
+                  (emms-lyrics-sync-waveform--composite-at-point
+                   (plist-get cached :played)
+                   (plist-get cached :remaining)
+                   cursor-x px-h pos-s duration))
                 (insert "\n"))
 
                ;; ── Window resized or PNG unavailable ─────────────────────

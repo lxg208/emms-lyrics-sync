@@ -152,10 +152,6 @@ old cached PNGs without a manual cache flush."
     (cons (expand-file-name (concat base "-played.png")    dir)
           (expand-file-name (concat base "-remaining.png") dir))))
 
-(defun emms-lyrics-sync-waveform--composite-path (played-path)
-  "Derive composite PNG path from PLAYED-PATH."
-  (replace-regexp-in-string "-played\\.png\\'" "-composite.png" played-path))
-
 ;;; ── Filter Complex Builder ───────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-waveform--filter-complex (px-w px-h bg-color wave-color)
@@ -283,50 +279,83 @@ No-op if already cached or pending."
 
 ;;; ── Composite Insertion ──────────────────────────────────────────────────────
 
-(defun emms-lyrics-sync-waveform--insert-composite (played-path remaining-path
-                                                      px-w px-h pos-s duration)
-  "Insert a composite waveform image at point.
-Combines PLAYED-PATH and REMAINING-PATH via ffmpeg crop+hstack into a
-single composite PNG, then inserts it.  No Emacs :crop used.
+(defun emms-lyrics-sync-waveform--composite-at-point (played-path remaining-path
+                                                                  cursor-x px-h
+                                                                  pos-s duration)
+  "Insert a composite waveform at point via a short-lived ffmpeg call.
 
-On failure (ffmpeg error, zero-byte output, or create-image failure),
-falls back to a Unicode flat bar so the waveform line is never blank."
-  (let* ((cursor-x     (if (and duration (> duration 0))
-                           (max 1 (min (1- px-w)
-                                       (round (* (/ pos-s (float duration))
-                                                 px-w))))
-                         0))
-         (remaining-w  (- px-w cursor-x))
-         (composite    (emms-lyrics-sync-waveform--composite-path played-path))
-         (fc           (format
-                        (concat "[0:v]crop=%d:%d:0:0,format=rgb24[left];"
-                                "[1:v]crop=%d:%d:%d:0,format=rgb24[right];"
-                                "[left][right]hstack=inputs=2,format=rgb24")
-                        cursor-x px-h
-                        remaining-w px-h cursor-x))
-         (result       (ignore-errors
-                         (call-process
-                          "ffmpeg" nil nil nil
-                          "-y"
-                          "-i" played-path
-                          "-i" remaining-path
-                          "-filter_complex" fc
-                          "-frames:v" "1"
-                          composite)))
-         (ok           (and (eq result 0)
-                            (file-exists-p composite)
-                            (> (or (file-attribute-size (file-attributes composite)) 0)
-                               100)))
-         (img          (when ok
-                         (clear-image-cache composite)
-                         (ignore-errors
-                           (create-image composite nil nil :scale 1.0)))))
-    (if img
-        (insert-image img)
-      ;; Fallback: Unicode flat bar — never leave the line blank
-      (insert (emms-lyrics-sync-waveform--render-unicode-flat
-               (max 4 (emms-lyrics-sync-display--body-width))
-               pos-s duration)))))
+Crops PLAYED-PATH to [0, CURSOR-X] and REMAINING-PATH to
+[CURSOR-X, end], hstack them into one composite PNG, and insert it.
+The ffmpeg call is synchronous (~20–50 ms with the fast build); the
+caller throttles this to ~1/sec via the display tick, so the cost is
+a few percent of one core.
+
+Emacs 32 does not honour :crop or :slice on inline images outside of
+image-mode, and its image-crop function is a different command with a
+different arity, so we cannot avoid the ffmpeg step.  This function is
+the practical replacement for the old `--insert-composite', with the
+deleted `--composite-path' helper inlined.
+
+Falls back to a Unicode flat bar on any error so the waveform line is
+never blank."
+  (condition-case err
+      (let* ((probe     (create-image played-path nil nil :scale 1.0))
+             (size      (and probe (image-size probe t)))
+             (img-w     (or (car-safe size) 0))
+             (rem-w     (- img-w cursor-x))
+             ;; Inline of the deleted `--composite-path' helper
+             (composite (replace-regexp-in-string
+                         "-played\\.png\\'" "-composite.png" played-path))
+             (fc        (format
+                         (concat "[0:v]crop=%d:%d:0:0,format=rgb24[left];"
+                                 "[1:v]crop=%d:%d:%d:0,format=rgb24[right];"
+                                 "[left][right]hstack=inputs=2,format=rgb24")
+                         cursor-x px-h
+                         rem-w px-h cursor-x))
+             (result    (ignore-errors
+                          (call-process "ffmpeg" nil nil nil
+                                        "-y"
+                                        "-i" played-path
+                                        "-i" remaining-path
+                                        "-filter_complex" fc
+                                        "-frames:v" "1"
+                                        composite))))
+        (if (and (eq result 0)
+                 (file-exists-p composite)
+                 (> (or (file-attribute-size (file-attributes composite)) 0)
+                    100))
+            (progn
+              (clear-image-cache composite)
+              (insert-image (create-image composite nil nil :scale 1.0)))
+          (insert (emms-lyrics-sync-waveform--render-unicode-flat
+                   (max 4 (emms-lyrics-sync-display--body-width))
+                   pos-s duration))))
+    (error
+     (when (bound-and-true-p emms-lyrics-sync-verbose)
+       (message "emms-lyrics-sync-waveform: composite failed: %S" err))
+     (insert (emms-lyrics-sync-waveform--render-unicode-flat
+              (max 4 (emms-lyrics-sync-display--body-width))
+              pos-s duration)))))
+
+(defun emms-lyrics-sync-waveform--target-dimensions (win-chars)
+  "Return (PX-W . PX-H) for the current frame and WIN-CHARS.
+
+PX-H is rounded up to a multiple of 4 because the composite filter
+crops the top and bottom halves of a yuv420p image; each half must
+have even height, so PX-H must be divisible by 4.
+
+PX-W is rounded up to even (historical requirement, kept for
+consistency with `--png-paths' filenames so cached PNGs are not
+needlessly regenerated)."
+  (let* ((char-w (frame-char-width))
+         (char-h (frame-char-height))
+         (px-w   (* win-chars char-w))
+         (raw-h  (* (if (boundp 'emms-lyrics-sync-waveform-height)
+                        emms-lyrics-sync-waveform-height 2)
+                    char-h))
+         (rem    (mod raw-h 4))
+         (px-h   (if (zerop rem) raw-h (+ raw-h (- 4 rem)))))
+    (cons (if (oddp px-w) (1+ px-w) px-w) px-h)))
 
 ;;; ── Unicode Flat Bar (terminal fallback) ─────────────────────────────────────
 
@@ -336,14 +365,14 @@ falls back to a Unicode flat bar so the waveform line is never blank."
                    (floor (* (/ pos-s (float duration)) width-chars))))
          (line   (make-string width-chars ?─)))
     (cl-loop for col from 0 below width-chars do
-      (let ((face (cond
-                   ((and cursor (= col cursor))
-                    'emms-lyrics-sync-waveform-cursor-face)
-                   ((and cursor (< col cursor))
-                    'emms-lyrics-sync-waveform-played-face)
-                   (t
-                    'emms-lyrics-sync-waveform-remaining-face))))
-        (put-text-property col (1+ col) 'face face line)))
+	     (let ((face (cond
+			  ((and cursor (= col cursor))
+			   'emms-lyrics-sync-waveform-cursor-face)
+			  ((and cursor (< col cursor))
+			   'emms-lyrics-sync-waveform-played-face)
+			  (t
+			   'emms-lyrics-sync-waveform-remaining-face))))
+               (put-text-property col (1+ col) 'face face line)))
     line))
 
 ;;; ── Insert At Point (called by redraw.el) ────────────────────────────────────
@@ -371,10 +400,15 @@ PNG generation, then triggers a same-track redraw on completion."
            (= (plist-get cached :px-h) px-h)
            (file-exists-p (plist-get cached :played))
            (file-exists-p (plist-get cached :remaining)))
-      (emms-lyrics-sync-waveform--insert-composite
-       (plist-get cached :played)
-       (plist-get cached :remaining)
-       px-w px-h pos-s duration)
+      (let ((cursor-x (if (and duration (> duration 0))
+                          (max 1 (min (1- px-w)
+                                      (round (* (/ pos-s (float duration))
+                                                px-w))))
+                        0)))
+        (emms-lyrics-sync-waveform--composite-at-point
+         (plist-get cached :played)
+         (plist-get cached :remaining)
+         cursor-x px-h pos-s duration))
       (insert "\n"))
 
      ;; ── PNG pending or wrong dimensions — show flat bar, start/wait ───
