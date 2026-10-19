@@ -256,5 +256,28 @@ taller than `cover-lines' would allow."
   :group 'emms-lyrics-sync)
 
 
+(defcustom emms-lyrics-sync-display-fontset nil
+  "Fontset name applied in the lyrics buffer, or nil.
+
+A fontset maps character ranges to specific fonts, letting you use
+different fonts for Latin and CJK text within the same buffer.  Each
+font in the fontset can be specified at its own size, so their
+vertical metrics can be matched.  Use this when a single font (via
+`emms-lyrics-sync-display-font-family') renders Latin or CJK text in a
+way you dislike.
+
+Example — SauceCodePro for Latin, FZYouHei for CJK, tuned heights:
+
+  (create-fontset-from-fontset-spec
+   \"-*-SauceCodePro Nerd Font-*-*-*-*-21-*-*-*-*-*-fontset-lyrics\")
+  (set-fontset-font \"fontset-lyrics\" 'han
+                    (font-spec :family \"FZYouH_504L\" :height 220))
+  (setq emms-lyrics-sync-display-fontset \"fontset-lyrics\")
+
+Takes precedence over `emms-lyrics-sync-display-font-family'.
+Call `emms-lyrics-sync-display-refresh-font' after changing this."
+  :type '(choice (const :tag "Use default" nil) string)
+  :group 'emms-lyrics-sync)
+
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

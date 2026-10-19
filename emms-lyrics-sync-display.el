@@ -36,6 +36,100 @@
 (require 'emms-lyrics-sync-display-render)
 (require 'emms-lyrics-sync-display-redraw)
 
+;;; ── Major mode ──────────────────────────────────────────────────────────────
+
+(defvar emms-lyrics-sync-display-mode-map
+  (let ((map (make-sparse-keymap)))
+    ;; Standard hide-window on q, regardless of what emms-playlist-mode-map
+    ;; binds q to (it may hide the playlist, which we don't want in a side
+    ;; window showing lyrics).
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `emms-lyrics-sync-display-mode'.
+
+Its parent is set to `emms-playlist-mode-map' so all EMMS player
+controls (pause, next, previous, mute, volume, seek, speed, etc.)
+work in this buffer as they do in the playlist buffer.  The global
+C-c L bindings from `emms-lyrics-sync-mode-map' also apply here.")
+
+(define-derived-mode emms-lyrics-sync-display-mode special-mode "EMMS-Lyrics"
+  "Major mode for the *emms-lyrics* display buffer.
+
+Player controls inherit from `emms-playlist-mode-map'.  Global
+C-c L bindings from `emms-lyrics-sync-mode-map' apply on top."
+  :group 'emms-lyrics-sync
+  (setq-local cursor-type        nil
+              truncate-lines     t
+              line-spacing       0.15
+              left-margin-width  1
+              right-margin-width 1)
+  (emms-lyrics-sync-display--apply-font))
+
+(with-eval-after-load 'emms-playlist-mode
+  (set-keymap-parent emms-lyrics-sync-display-mode-map
+                     emms-playlist-mode-map))
+
+(defun emms-lyrics-sync-display--fontset-exists-p (name)
+  "Return non-nil if NAME identifies a defined fontset.
+Accepts both plain \"fontset-foo\" and \"-*-fontset-foo\" name forms."
+  (or (query-fontset name t)
+      (query-fontset (concat "-*-" name) t)))
+
+(defun emms-lyrics-sync-display--apply-font ()
+  "Apply `display-fontset' or `display-font-family' to current buffer.
+Fontset takes precedence; both nil means no override.
+
+NOTE ON ATTRIBUTES: `display-fontset' expects a fontset name like
+\"fontset-lyrics\" and must be applied with the `:font' attribute
+(which accepts fontset names).  `display-font-family' expects a font
+family name like \"Sarasa Mono SC\" and must be applied with
+`:family'.  Swapping the two silently falls back to the default
+face — that was the original bug.
+
+NOTE ON EMACS 32: fontset creation via `create-fontset-from-fontset-spec'
+followed by `set-fontset-font' silently produces an unusable fontset
+in Emacs 32.0.50 (fontset-font returns fallback bitmaps,
+set-fontset-font returns nil, internal-delete-fontset errors).  Users
+on affected builds should set `display-fontset' to nil and use
+`display-font-family' instead."
+  (when (bound-and-true-p buffer-face-mode)
+    (buffer-face-mode -1))
+  (cond
+   ((and emms-lyrics-sync-display-fontset
+         (emms-lyrics-sync-display--fontset-exists-p
+          emms-lyrics-sync-display-fontset))
+    ;; :font, not :family — display-fontset holds a fontset name
+    (setq-local face-remapping-alist
+                (list (cons 'default
+                            (list :font emms-lyrics-sync-display-fontset)))))
+   (emms-lyrics-sync-display-fontset
+    (message
+     "emms-lyrics-sync: fontset %S not defined; falling back to font-family"
+     emms-lyrics-sync-display-fontset)
+    (setq-local face-remapping-alist
+                (when emms-lyrics-sync-display-font-family
+                  (list (cons 'default
+                              (list :family
+                                    emms-lyrics-sync-display-font-family))))))
+   (emms-lyrics-sync-display-font-family
+    ;; :family, not :font — display-font-family holds a family name
+    (setq-local face-remapping-alist
+                (list (cons 'default
+                            (list :family
+                                  emms-lyrics-sync-display-font-family)))))
+   (t
+    (setq-local face-remapping-alist nil))))
+
+;;;###autoload
+(defun emms-lyrics-sync-display-refresh-font ()
+  "Re-apply font settings to the lyrics buffer without restarting Emacs.
+Call after changing `emms-lyrics-sync-display-fontset' or
+`emms-lyrics-sync-display-font-family'."
+  (interactive)
+  (when (buffer-live-p emms-lyrics-sync-display--buffer)
+    (with-current-buffer emms-lyrics-sync-display--buffer
+      (emms-lyrics-sync-display--apply-font))))
+
 ;;; ── Buffer & Window Management ───────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--get-buffer ()
@@ -44,16 +138,7 @@
     (setq emms-lyrics-sync-display--buffer
           (get-buffer-create emms-lyrics-sync-display-buffer-name))
     (with-current-buffer emms-lyrics-sync-display--buffer
-      (special-mode)
-      (setq-local cursor-type        nil
-                  truncate-lines     t
-                  line-spacing       0.15
-                  left-margin-width  1
-                  right-margin-width 1)
-      (when emms-lyrics-sync-display-font-family
-        (setq-local buffer-face-mode-face
-                    (list :family emms-lyrics-sync-display-font-family))
-        (buffer-face-mode 1))))
+      (emms-lyrics-sync-display-mode)))
   emms-lyrics-sync-display--buffer)
 
 ;;;###autoload
