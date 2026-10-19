@@ -96,6 +96,14 @@ Falls back to `emms-lyrics-sync-cache-dir' when the music directory is read-only
   :type  'boolean
   :group 'emms-lyrics-sync)
 
+(defcustom emms-lyrics-sync-verbose nil
+  "When non-nil, log every source attempt, failure, and success to *Messages*.
+When nil, only report the final outcome (success + source name,
+or \"no lyrics found in any source\").  Transient HTTP errors from
+intermediate sources are suppressed when this is nil."
+  :type 'boolean
+  :group 'emms-lyrics-sync)
+
 ;;; ── mpv IPC Options ──────────────────────────────────────────────────────────
 
 (defcustom emms-lyrics-sync-mpv-socket
@@ -424,30 +432,38 @@ For plain-text lyrics, wraps each line as an unsynced `emms-lyrics-sync-line'."
 ;;; ── Source Pipeline ──────────────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-core--try-sources (track token sources callback)
-  "Try each function in SOURCES for TRACK; call CALLBACK with the first hit.
-SOURCES is a list of functions each accepting (track cb).
-TOKEN is the fetch token at the time this fetch was launched; if it no longer
-matches `emms-lyrics-sync-core--fetch-token' the result is discarded (stale).
-CALLBACK is called with an `emms-lyrics-sync-result' or nil."
+  "Try each function in SOURCES for TRACK; call CALLBACK with the first hit."
   (if (null sources)
       ;; All sources exhausted
       (when (= token emms-lyrics-sync-core--fetch-token)
+        (when emms-lyrics-sync-verbose
+	  (message "emms-lyrics: no lyrics found for %S"
+         (or (emms-lyrics-sync-track-title track) "unknown")))
         (funcall callback nil))
     (let ((source (car sources))
           (rest   (cdr sources)))
+      (when emms-lyrics-sync-verbose
+        (message "emms-lyrics: trying %S ..." source))
       (condition-case err
           (funcall source track
                    (lambda (result)
-                     ;; Discard stale results from superseded track fetches
                      (if (not (= token emms-lyrics-sync-core--fetch-token))
                          nil
                        (if result
-                           (funcall callback result)
-                         ;; Try next source
+                           (progn
+                             (when emms-lyrics-sync-verbose
+                               (message "emms-lyrics: lyrics from %S (%d chars)"
+                                        (emms-lyrics-sync-result-source result)
+                                        (length (emms-lyrics-sync-result-content
+                                                 result))))
+                             (funcall callback result))
+                         (when emms-lyrics-sync-verbose
+                           (message "emms-lyrics: %S returned nil, trying next" source))
                          (emms-lyrics-sync-core--try-sources
                           track token rest callback)))))
         (error
-         (message "emms-lyrics: source %S error: %S" source err)
+         (when emms-lyrics-sync-verbose
+           (message "emms-lyrics: source %S error: %S" source err))
          (emms-lyrics-sync-core--try-sources track token rest callback))))))
 
 ;;; ── Public Entry Points ──────────────────────────────────────────────────────

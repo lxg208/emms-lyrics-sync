@@ -126,18 +126,24 @@ Returns nil when:
 ;;; ── HTTP Error Handling ──────────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-lrclib--handle-error (err callback)
-  "Log the plz ERR for LRCLIB and invoke CALLBACK with nil."
-  (let ((status (and (plz-error-p err)
-                     (plz-response-status (plz-error-response err)))))
-    (cond
-     ((eq status 404)
-      ;; Not found is expected and not worth logging at normal verbosity.
-      nil)
-     ((eq status 429)
-      (message "emms-lyrics-sync-lrclib: rate limited — will retry on next track change"))
-     (t
-      (message "emms-lyrics-sync-lrclib: HTTP error %S: %S" status err))))
-  (funcall callback nil))
+  "Log ERR for LRCLIB and invoke CALLBACK with nil.
+Uses unwind-protect so the callback fires even if logging raises."
+  (unwind-protect
+      (ignore-errors
+        (let ((status (and (plz-error-p err)
+                           (plz-error-response err)
+                           (plz-response-status
+                            (plz-error-response err)))))
+          (when (or emms-lyrics-sync-verbose (eql status 429))
+            (cond
+             ((eql status 404) nil)
+             ((eql status 429)
+              (message "emms-lyrics-sync-lrclib: rate limited (429)"))
+             (status
+              (message "emms-lyrics-sync-lrclib: HTTP %S" status))
+             (t
+              (message "emms-lyrics-sync-lrclib: error %S" err))))))
+    (funcall callback nil)))
 
 ;;; ── Source Entry Point ───────────────────────────────────────────────────────
 

@@ -281,7 +281,8 @@ Pre-fills all metadata fields; user edits and confirms with \\[emms-lyrics-sync-
      (lambda (results)
        (if results
            (emms-lyrics-sync-search--show-results results search-track)
-         (message "emms-lyrics: no lyrics found in any source"))))))
+         (message "emms-lyrics: no lyrics found for %S"
+         (or (emms-lyrics-sync-track-title track) "unknown")))))))
 
 (defun emms-lyrics-sync-search--query-parallel (track sources callback)
   "Query all SOURCES for TRACK in parallel; call CALLBACK with result list.

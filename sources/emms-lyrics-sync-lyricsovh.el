@@ -100,14 +100,16 @@ CALLBACK is called with an `emms-lyrics-sync-result' or nil."
       :as      'string
       :then    (lambda (body)
                  (funcall callback (emms-lyrics-sync-lyricsovh--parse body)))
-      :else    (lambda (err)
-                 ;; 404 = not found, anything else is a real error
-                 (let ((status (and (plz-error-p err)
-                                    (plz-response-status
-                                     (plz-error-response err)))))
-                   (unless (eq status 404)
-                     (message "emms-lyrics-sync-lyricsovh: HTTP error %S" status)))
-                 (funcall callback nil)))))
+      :else (lambda (err)
+              (when emms-lyrics-sync-verbose
+		(ignore-errors
+		  (let ((status (and (plz-error-p err)
+				     (plz-response-status
+                                      (plz-error-response err)))))
+		    (message "emms-lyrics-sync-lyricsovh: %s"
+			     (if status (format "HTTP %S" status) err)))))
+              (funcall callback nil))      
+      )))
 
 (provide 'emms-lyrics-sync-lyricsovh)
 ;;; emms-lyrics-sync-lyricsovh.el ends here
