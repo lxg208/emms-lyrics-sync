@@ -219,5 +219,25 @@ Subtracts 2 for the left and right margin widths set in display.el."
          (pad   (max 0 (/ (- width len) 2))))
     (concat (make-string pad ?\s) str)))
 
+;; In emms-lyrics-sync-display-vars.el
+(defcustom emms-lyrics-sync-display-cover-lines 10
+  "Target cover art height in character lines.
+Effective pixel height is `cover-lines × frame-char-height', clamped by
+`emms-lyrics-sync-display-cover-height' (hard upper bound) and by the
+space available in the window after reserving room for the header,
+lyrics, and waveform.  This makes the cover occupy the same visual
+proportion on every machine regardless of DPI or scaling mode."
+  :type  'integer
+  :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-cover-height 900
+  "Hard upper bound on cover art pixel height.  Rarely reached.
+The effective height is min(cover-height, cover-lines × char-height,
+available-lines × char-height).  Raise this only if you want a cover
+taller than `cover-lines' would allow."
+  :type  'integer
+  :group 'emms-lyrics-sync)
+
+
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

@@ -74,22 +74,61 @@ Returns the stable path on success, nil on failure."
             (setq out nil))))
       (and out (file-exists-p out) out))))
 
+(defun emms-lyrics-sync-display--effective-cover-height ()
+  "Return cover art pixel height capped by cover-lines and window space."
+  (let* ((char-h    (frame-char-height))
+         (win       (emms-lyrics-sync-display--window))
+         (win-h     (if win (window-body-height win) 40))
+         (reserved  (+ 5                                ; header worst case
+                       emms-lyrics-sync-display-lyrics-height
+                       emms-lyrics-sync-waveform-height
+                       1))                              ; slack for partial line
+         (avail     (max 4 (- win-h reserved)))
+         (target-lines (min emms-lyrics-sync-display-cover-lines avail))
+         (target-px    (min emms-lyrics-sync-display-cover-height
+                            (* target-lines char-h))))
+    target-px))
+
 (defun emms-lyrics-sync-display--cover-image (file-path)
-  "Return a (possibly cached) Emacs image for the cover of FILE-PATH, or nil."
-  (when (and (display-graphic-p)
-             (> emms-lyrics-sync-display-cover-height 0)
-             file-path)
-    (or (gethash file-path emms-lyrics-sync-display--cover-cache)
-        (let* ((cover (or (emms-lyrics-sync-display--extract-embedded-cover file-path)
-                          (emms-lyrics-sync-display--find-cover-file file-path)))
+  "Return a (possibly cached) Emacs image for the cover of FILE-PATH, or nil.
+
+Resolution order (matches upstream emms-lyrics behavior):
+  1. Embedded art extracted from the file itself (via ffmpeg, disk-cached)
+  2. Sidecar image in the track's directory (cover.jpg / front.jpg / ...)
+
+The cache key includes the effective pixel height so a window resize
+triggers re-resolution at the new size.  Failures are cached as `none'
+internally so expensive extraction is attempted only once per
+(file, height) pair — but `nil' is returned to the caller, never
+`none', so image-handling callers can safely do (when img ...)."
+  (when (and (display-graphic-p) file-path)
+    (let* ((target-h (emms-lyrics-sync-display--effective-cover-height))
+           (key      (list file-path target-h))
+           (cached   (gethash key emms-lyrics-sync-display--cover-cache)))
+      (cond
+       ;; Cached failure — return nil, do not retry
+       ((eq cached 'none) nil)
+       ;; Cached success
+       (cached            cached)
+       ;; Not yet resolved
+       (t
+        (let* ((cover (ignore-errors
+                        (or (emms-lyrics-sync-display--extract-embedded-cover
+                             file-path)
+                            (emms-lyrics-sync-display--find-cover-file
+                             file-path))))
                (img   (when cover
                         (ignore-errors
                           (create-image cover nil nil
-                                        :height emms-lyrics-sync-display-cover-height
+                                        :height target-h
                                         :scale  1.0)))))
-          (when img
-            (puthash file-path img emms-lyrics-sync-display--cover-cache))
-          img))))
+          (if img
+              (progn
+                (puthash key img emms-lyrics-sync-display--cover-cache)
+                img)
+            (puthash key 'none emms-lyrics-sync-display--cover-cache)
+            nil)))))))
+
 
 ;;; ── ffprobe Tech-Info Augmentation ───────────────────────────────────────────
 
