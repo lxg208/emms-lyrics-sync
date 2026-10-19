@@ -287,7 +287,10 @@ No-op if already cached or pending."
                                                       px-w px-h pos-s duration)
   "Insert a composite waveform image at point.
 Combines PLAYED-PATH and REMAINING-PATH via ffmpeg crop+hstack into a
-single composite PNG, then inserts it.  No Emacs :crop used."
+single composite PNG, then inserts it.  No Emacs :crop used.
+
+On failure (ffmpeg error, zero-byte output, or create-image failure),
+falls back to a Unicode flat bar so the waveform line is never blank."
   (let* ((cursor-x     (if (and duration (> duration 0))
                            (max 1 (min (1- px-w)
                                        (round (* (/ pos-s (float duration))
@@ -296,24 +299,34 @@ single composite PNG, then inserts it.  No Emacs :crop used."
          (remaining-w  (- px-w cursor-x))
          (composite    (emms-lyrics-sync-waveform--composite-path played-path))
          (fc           (format
-                        "[0:v]crop=%d:%d:0:0[left];[1:v]crop=%d:%d:%d:0[right];[left][right]hstack=inputs=2"
+                        (concat "[0:v]crop=%d:%d:0:0,format=rgb24[left];"
+                                "[1:v]crop=%d:%d:%d:0,format=rgb24[right];"
+                                "[left][right]hstack=inputs=2,format=rgb24")
                         cursor-x px-h
                         remaining-w px-h cursor-x))
-         (result       (call-process
-                        "ffmpeg" nil nil nil
-                        "-y"
-                        "-i" played-path
-                        "-i" remaining-path
-                        "-filter_complex" fc
-                        "-frames:v" "1"
-                        composite)))
-    (when (and (= result 0)
-               (file-exists-p composite)
-               (> (or (file-attribute-size (file-attributes composite)) 0) 100))
-      (clear-image-cache composite)
-      (let ((img (create-image composite nil nil :scale 1.0)))
-        (when img
-          (insert-image img))))))
+         (result       (ignore-errors
+                         (call-process
+                          "ffmpeg" nil nil nil
+                          "-y"
+                          "-i" played-path
+                          "-i" remaining-path
+                          "-filter_complex" fc
+                          "-frames:v" "1"
+                          composite)))
+         (ok           (and (eq result 0)
+                            (file-exists-p composite)
+                            (> (or (file-attribute-size (file-attributes composite)) 0)
+                               100)))
+         (img          (when ok
+                         (clear-image-cache composite)
+                         (ignore-errors
+                           (create-image composite nil nil :scale 1.0)))))
+    (if img
+        (insert-image img)
+      ;; Fallback: Unicode flat bar — never leave the line blank
+      (insert (emms-lyrics-sync-waveform--render-unicode-flat
+               (max 4 (emms-lyrics-sync-display--body-width))
+               pos-s duration)))))
 
 ;;; ── Unicode Flat Bar (terminal fallback) ─────────────────────────────────────
 
