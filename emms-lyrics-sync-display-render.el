@@ -79,11 +79,18 @@ Returns the stable path on success, nil on failure."
   (let* ((char-h    (frame-char-height))
          (win       (emms-lyrics-sync-display--window))
          (win-h     (if win (window-body-height win) 40))
-         (reserved  (+ 5                                ; header worst case
+         ;; Fixed budget = everything except the cover image itself.
+         ;;   header 5  + blank-after-header 1  + lyrics 12
+         ;;   + waveform-separator 1 + waveform 3 + waveform-trailing 1
+         (fixed     (+ 5
+                       1
                        emms-lyrics-sync-display-lyrics-height
+                       1
                        emms-lyrics-sync-waveform-height
-                       1))                              ; slack for partial line
-         (avail     (max 4 (- win-h reserved)))
+                       1))
+         ;; Cover itself + 2 newlines after it
+         (cover-extra 2)
+         (avail     (max 3 (- win-h fixed cover-extra)))
          (target-lines (min emms-lyrics-sync-display-cover-lines avail))
          (target-px    (min emms-lyrics-sync-display-cover-height
                             (* target-lines char-h))))
