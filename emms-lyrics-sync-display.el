@@ -49,7 +49,11 @@
                   truncate-lines     t
                   line-spacing       0.15
                   left-margin-width  1
-                  right-margin-width 1)))
+                  right-margin-width 1)
+      (when emms-lyrics-sync-display-font-family
+        (setq-local buffer-face-mode-face
+                    (list :family emms-lyrics-sync-display-font-family))
+        (buffer-face-mode 1))))
   emms-lyrics-sync-display--buffer)
 
 ;;;###autoload

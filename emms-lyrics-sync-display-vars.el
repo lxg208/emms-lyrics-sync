@@ -25,6 +25,23 @@
 
 ;;; ── Customization ────────────────────────────────────────────────────────────
 
+(defcustom emms-lyrics-sync-display-font-family nil
+  "Font family forced in the lyrics buffer, or nil to use the default.
+When non-nil, all text in the *emms-lyrics* buffer is displayed in this
+single family regardless of character script.  This prevents baseline
+jitter between Latin and CJK characters when their fallback fonts have
+different line heights.
+
+Choose a font that is monospaced for both Latin and CJK at matched
+vertical metrics, e.g. \"Sarasa Mono SC\" or \"Source Han Mono SC\".
+A proportional CJK font (e.g. most 黑体 faces) will make Latin text
+look poorly spaced.
+
+Changes take effect on the next lyrics buffer creation — restart
+Emacs (or kill the *emms-lyrics* buffer) after changing this value."
+  :type '(choice (const :tag "Use default face" nil) string)
+  :group 'emms-lyrics-sync)
+
 (defcustom emms-lyrics-sync-display-buffer-name "*emms-lyrics*"
   "Name of the emms-lyrics-sync display buffer."
   :type  'string

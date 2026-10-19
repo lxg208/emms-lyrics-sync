@@ -167,15 +167,20 @@ Candidates scoring below this threshold are rejected."
 
 (defun emms-lyrics-sync-qqmusic--parse-lyric (body)
   "Parse QQ Music lyric BODY; return `emms-lyrics-sync-result' or nil.
-The `lyric' field is base64-encoded LRC; we decode it here."
+The `lyric' field is base64-encoded LRC.  The decoded bytes are UTF-8;
+they are explicitly decoded to a multibyte string before being stored
+so downstream consumers never see unibyte content."
   (condition-case err
-      (let* ((obj     (json-parse-string body :object-type 'alist
-                                              :null-object nil
-                                              :false-object nil))
-             (b64     (cdr (assq 'lyric obj)))
-             (decoded (and (stringp b64)
-                           (not (string-empty-p (string-trim b64)))
-                           (base64-decode-string b64))))
+      (let* ((obj      (json-parse-string body :object-type 'alist
+                                               :null-object nil
+                                               :false-object nil))
+             (b64      (cdr (assq 'lyric obj)))
+             (raw      (and (stringp b64)
+                            (not (string-empty-p (string-trim b64)))
+                            (ignore-errors (base64-decode-string b64))))
+             ;; base64-decode-string → unibyte; decode to proper UTF-8
+             (decoded  (and raw
+                            (decode-coding-string raw 'utf-8))))
         (when (and decoded
                    (stringp decoded)
                    (not (string-empty-p (string-trim decoded))))
