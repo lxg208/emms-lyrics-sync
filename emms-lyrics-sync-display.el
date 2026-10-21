@@ -52,6 +52,65 @@ controls (pause, next, previous, mute, volume, seek, speed, etc.)
 work in this buffer as they do in the playlist buffer.  The global
 C-c L bindings from `emms-lyrics-sync-mode-map' also apply here.")
 
+(defun emms-lyrics-sync-display--apply-font ()
+  "Apply `display-fontset' or `display-font-family' to current buffer.
+
+Fontset takes precedence; font-family is the recommended path on
+Emacs 32 where `create-fontset-from-fontset-spec' produces an
+unusable fontset.
+
+The base font height is `display-font-scale' × the frame's default
+face height.  This value is stored in
+`emms-lyrics-sync-display--base-height' for
+`emms-lyrics-sync-display--apply-cjk-font' to multiply by
+`display-cjk-scale'.
+
+The family branch sets `face-remapping-alist' directly (rather than
+`buffer-face-mode') so we can remap both `default' and
+`emms-lyrics-sync-future-line-face'.  The latter explicitly inherits
+from `default', and on some Emacs builds the inheritance resolves
+against the frame default rather than the remapped default, so
+without an explicit remap future lines render at baseline height
+while current and past lines pick up the scaled height.  Result
+without the fix: mixed Latin/CJK future lines jitter because CJK
+gets the scaled height from `--apply-cjk-font' while Latin stays at
+baseline."
+  (when (bound-and-true-p buffer-face-mode)
+    (buffer-face-mode -1))
+  (cond
+   ;; ── Fontset branch ──────────────────────────────────────────────────
+   ((and emms-lyrics-sync-display-fontset
+         (or (query-fontset emms-lyrics-sync-display-fontset t)
+             (query-fontset
+              (concat "-*-" emms-lyrics-sync-display-fontset) t)))
+    (setq-local face-remapping-alist
+                (list (cons 'default
+                            (list :font emms-lyrics-sync-display-fontset))))
+    (setq-local emms-lyrics-sync-display--base-height
+                (face-attribute 'default :height)))
+
+   (emms-lyrics-sync-display-fontset
+    (message
+     "emms-lyrics-sync: fontset %S not defined; falling back to font-family"
+     emms-lyrics-sync-display-fontset))
+
+   ;; ── Family branch — live path for your config ───────────────────────
+   (emms-lyrics-sync-display-font-family
+    (let* ((frame-h  (face-attribute 'default :height))
+           (scale    (or emms-lyrics-sync-display-font-scale 1.0))
+           (scaled-h (round (* frame-h scale))))
+      (setq-local emms-lyrics-sync-display--base-height scaled-h)
+      (setq-local buffer-face-mode-face
+                  (list :family emms-lyrics-sync-display-font-family
+                        :height scaled-h))
+      (buffer-face-mode 1)))
+
+   ;; ── Neither set ─────────────────────────────────────────────────────
+   (t
+    (setq-local face-remapping-alist nil)
+    (setq-local emms-lyrics-sync-display--base-height
+                (face-attribute 'default :height)))))
+
 (define-derived-mode emms-lyrics-sync-display-mode special-mode "EMMS-Lyrics"
   "Major mode for the *emms-lyrics* display buffer.
 
@@ -68,57 +127,6 @@ C-c L bindings from `emms-lyrics-sync-mode-map' apply on top."
 (with-eval-after-load 'emms-playlist-mode
   (set-keymap-parent emms-lyrics-sync-display-mode-map
                      emms-playlist-mode-map))
-
-(defun emms-lyrics-sync-display--fontset-exists-p (name)
-  "Return non-nil if NAME identifies a defined fontset.
-Accepts both plain \"fontset-foo\" and \"-*-fontset-foo\" name forms."
-  (or (query-fontset name t)
-      (query-fontset (concat "-*-" name) t)))
-
-(defun emms-lyrics-sync-display--apply-font ()
-  "Apply `display-fontset' or `display-font-family' to current buffer.
-Fontset takes precedence; both nil means no override.
-
-NOTE ON ATTRIBUTES: `display-fontset' expects a fontset name like
-\"fontset-lyrics\" and must be applied with the `:font' attribute
-(which accepts fontset names).  `display-font-family' expects a font
-family name like \"Sarasa Mono SC\" and must be applied with
-`:family'.  Swapping the two silently falls back to the default
-face — that was the original bug.
-
-NOTE ON EMACS 32: fontset creation via `create-fontset-from-fontset-spec'
-followed by `set-fontset-font' silently produces an unusable fontset
-in Emacs 32.0.50 (fontset-font returns fallback bitmaps,
-set-fontset-font returns nil, internal-delete-fontset errors).  Users
-on affected builds should set `display-fontset' to nil and use
-`display-font-family' instead."
-  (when (bound-and-true-p buffer-face-mode)
-    (buffer-face-mode -1))
-  (cond
-   ((and emms-lyrics-sync-display-fontset
-         (emms-lyrics-sync-display--fontset-exists-p
-          emms-lyrics-sync-display-fontset))
-    ;; :font, not :family — display-fontset holds a fontset name
-    (setq-local face-remapping-alist
-                (list (cons 'default
-                            (list :font emms-lyrics-sync-display-fontset)))))
-   (emms-lyrics-sync-display-fontset
-    (message
-     "emms-lyrics-sync: fontset %S not defined; falling back to font-family"
-     emms-lyrics-sync-display-fontset)
-    (setq-local face-remapping-alist
-                (when emms-lyrics-sync-display-font-family
-                  (list (cons 'default
-                              (list :family
-                                    emms-lyrics-sync-display-font-family))))))
-   (emms-lyrics-sync-display-font-family
-    ;; :family, not :font — display-font-family holds a family name
-    (setq-local face-remapping-alist
-                (list (cons 'default
-                            (list :family
-                                  emms-lyrics-sync-display-font-family)))))
-   (t
-    (setq-local face-remapping-alist nil))))
 
 ;;;###autoload
 (defun emms-lyrics-sync-display-refresh-font ()

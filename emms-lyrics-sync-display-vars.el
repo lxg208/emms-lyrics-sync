@@ -42,6 +42,79 @@ Emacs (or kill the *emms-lyrics* buffer) after changing this value."
   :type '(choice (const :tag "Use default face" nil) string)
   :group 'emms-lyrics-sync)
 
+(defcustom emms-lyrics-sync-display-cjk-font nil
+  "Font family for CJK characters in the lyrics buffer, or nil.
+
+When non-nil, CJK runs (detected via East Asian Width, i.e.
+`char-width' = 2) receive a `:family'/`:height' face text property
+pointing at this family.  Face properties take priority over the
+buffer's base `:family' in Emacs font resolution, so Latin renders
+with `display-font-family' and CJK with this family, each at an
+independently controlled size.
+
+Recommended pairing:
+  (setq emms-lyrics-sync-display-font-family \"SauceCodePro Nerd Font\")
+  (setq emms-lyrics-sync-display-cjk-font   \"FZYouH_504L\")
+  (setq emms-lyrics-sync-display-cjk-scale  1.10)
+
+Leave nil to use `display-font-family' for all scripts (recommended
+when that family already covers Latin and CJK at matched vertical
+metrics, e.g. Sarasa Mono SC or Source Han Mono)."
+  :type '(choice (const :tag "Use display-font-family for all scripts" nil)
+                 string)
+  :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-cjk-scale 1.10
+  "Height multiplier for CJK text relative to the default face height.
+
+Only used when `display-cjk-font' is non-nil.  Effective CJK height is
+  (face-attribute 'default :height) × display-cjk-scale
+which is an absolute pixel/point height in the same units as the
+`default' face's :height attribute.
+
+Tune visually: CJK glyphs often appear smaller than Latin at the same
+nominal point size (smaller x-height relative to em-square), so a
+scale slightly above 1.0 often renders at visual parity.  1.05-1.20
+covers most font pairs."
+  :type 'number
+  :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-font-scale 1.0
+  "Multiplier applied to the default face height in the lyrics buffer.
+
+1.0 = same as the frame's default face.  0.85 = 15% smaller, useful on
+small screens to fit more content (or a taller waveform) without
+shrinking the cover further.  1.1 = 10% larger for readability on
+high-DPI displays.
+
+CJK text scales by `display-font-scale × display-cjk-scale', so
+`display-cjk-scale' stays a *relative* multiplier against whatever
+Latin size is in effect.  Reducing `display-font-scale' shrinks both
+scripts proportionally; reducing only `display-cjk-scale' shrinks
+only CJK.
+
+The cover and waveform heights are computed from `frame-char-height',
+which is independent of this option — font-scale only affects the
+height of the lyric/header text, not the images.  To make room for a
+taller waveform on a small screen, lower this and then raise
+`emms-lyrics-sync-waveform-height'."
+  :type 'number
+  :group 'emms-lyrics-sync)
+
+(defvar-local emms-lyrics-sync-display--base-height nil
+  "Effective base face height (:height attribute) in the lyrics buffer.
+
+Set by `emms-lyrics-sync-display--apply-font' to
+  (face-attribute 'default :height) × display-font-scale
+before `buffer-face-mode' remaps the default face.  Read by
+`emms-lyrics-sync-display--apply-cjk-font' to compute CJK height as
+  base-height × display-cjk-scale
+
+Storing the value in a buffer-local avoids depending on whether
+`face-attribute' consults `face-remapping-alist' after
+buffer-face-mode installs a `:height' override — that behavior is
+not specified and has varied across Emacs versions.")
+
 (defcustom emms-lyrics-sync-display-buffer-name "*emms-lyrics*"
   "Name of the emms-lyrics-sync display buffer."
   :type  'string
@@ -151,8 +224,17 @@ Warm amber — no bold weight so string-width centering stays accurate."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-future-line-face
-  '((t :inherit default))
-  "Face for upcoming lyrics lines."
+  '((t))
+  "Face for upcoming lyrics lines.
+
+Empty spec: the face falls through to the buffer's effective
+`default' for all attributes.  This is intentionally *not*
+`(:inherit default)' — an explicit `:inherit default' resolves
+against the frame's default face, bypassing the buffer-local
+`face-remapping-alist' height override installed by `--apply-font'.
+An empty spec cascades implicitly through the remapped default, so
+future lines pick up `display-font-scale' at the same height as
+current and past lines."
   :group 'emms-lyrics-sync)
 
 (defface emms-lyrics-sync-word-sung-face
@@ -255,7 +337,6 @@ taller than `cover-lines' would allow."
   :type  'integer
   :group 'emms-lyrics-sync)
 
-
 (defcustom emms-lyrics-sync-display-fontset nil
   "Fontset name applied in the lyrics buffer, or nil.
 
@@ -278,6 +359,211 @@ Takes precedence over `emms-lyrics-sync-display-font-family'.
 Call `emms-lyrics-sync-display-refresh-font' after changing this."
   :type '(choice (const :tag "Use default" nil) string)
   :group 'emms-lyrics-sync)
+
+;;; ── CJK font application ─────────────────────────────────────────────────────
+
+(defun emms-lyrics-sync-display--cjk-char-p (char)
+  "Return non-nil if CHAR should use the CJK font.
+
+Uses `char-width' (East Asian Width), which returns 2 for kanji,
+kana, hangul, bopomofo, fullwidth forms, and CJK punctuation.
+More reliable than `get-char-code-property' with 'script, which
+does not return script names in any Emacs build: script data comes
+from Scripts.txt, not UnicodeData.txt, and is not in
+`char-code-property-table'."
+  (and (characterp char) (= 2 (char-width char))))
+
+(defun emms-lyrics-sync-display--apply-cjk-font (start end)
+  "Apply `display-cjk-font' as a face text property to CJK runs in [START, END).
+Face text properties honor both :family and :height and merge cleanly
+with existing face attributes via `add-face-text-property'.  Height
+is `emms-lyrics-sync-display--base-height' × `display-cjk-scale',
+where the base reflects `display-font-scale' set by `--apply-font'.
+No-op when `display-cjk-font' is nil."
+  (when (and emms-lyrics-sync-display-cjk-font
+             (integerp start)
+             (integerp end)
+             (< start end))
+    (let* ((base-h (or emms-lyrics-sync-display--base-height
+                       (face-attribute 'default :height)))
+           (scale  (or emms-lyrics-sync-display-cjk-scale 1.10))
+           (cjk-h  (round (* base-h scale)))
+           (spec   (list :family emms-lyrics-sync-display-cjk-font
+                         :height cjk-h))
+           (pos    start)
+           (run-st nil))
+      (save-excursion
+        (goto-char start)
+        (while (< pos end)
+          (if (emms-lyrics-sync-display--cjk-char-p (char-after pos))
+              (unless run-st (setq run-st pos))
+            (when run-st
+              (add-face-text-property run-st pos spec 'append)
+              (setq run-st nil)))
+          (setq pos (1+ pos)))
+        (when run-st
+          (add-face-text-property run-st end spec 'append))))))
+
+;;; ── Font x-height calibration ────────────────────────────────────────────────
+
+(defun emms-lyrics-sync-display--decode-font-path (path)
+  "Return PATH as a multibyte string using `file-name-coding-system'.
+
+`font-info' returns the file path in the raw bytes the font backend
+produced — a unibyte string for paths containing non-ASCII characters.
+Unibyte strings with high bytes display as octal escapes in `%s',
+`format', and `message', making log output unreadable and breaking
+any consumer that treats the value as text (e.g. embedding it in a
+process argument via `%S').
+
+Decodes with `file-name-coding-system' (falling back to UTF-8 on
+Linux/macOS) so the return value round-trips cleanly through
+`file-readable-p', `find-file', `message', and `call-process' — the
+same path Emacs itself uses for reading files."
+  (cond
+   ((not (stringp path)) path)
+   ((multibyte-string-p path) path)
+   (t (decode-coding-string path (or file-name-coding-system 'utf-8)))))
+
+(defun emms-lyrics-sync-display--font-file-for-family (family &optional weight slant)
+  "Return the installed font file path for FAMILY, or nil.
+
+WEIGHT and SLANT narrow the match; both default to whatever `find-font'
+selects for FAMILY alone.  For families that ship many variants,
+specifying at least SLANT avoids surprising picks — SauceCodePro Nerd
+Font Mono, for example, resolves LightItalic before Light when only
+WEIGHT is given, because fontconfig's default slant preference for that
+family is italic.
+
+SLANT symbols: `normal' (= roman), `italic', `oblique'.
+WEIGHT symbols: `thin', `ultra-light', `light', `semi-light', `book',
+                `regular', `medium', `semi-bold', `bold', `ultra-bold',
+                `heavy', `ultra-heavy'.
+
+Returns a multibyte string (decoded via `file-name-coding-system') so
+the value is safe for `message', `format %s', and process arguments."
+  (when family
+    (let* ((props (append (list :family family)
+                          (when weight (list :weight weight))
+                          (when slant  (list :slant  slant))))
+           (spec (apply #'font-spec props))
+           (ent  (find-font spec)))
+      (when ent
+        (let ((info (ignore-errors (font-info ent))))
+          (cond
+           ((and (vectorp info)
+                 (>= (length info) 12)
+                 (stringp (aref info 11))
+                 (file-readable-p (aref info 11)))
+            (emms-lyrics-sync-display--decode-font-path (aref info 11)))
+           ((vectorp info)
+            (cl-loop for x across info
+                     when (and (stringp x) (file-regular-p x))
+                     return (emms-lyrics-sync-display--decode-font-path x)))
+           (t nil)))))))
+
+(defun emms-lyrics-sync-display--measure-x-height (font-file char &optional px-size)
+  "Return x-height of CHAR in FONT-FILE at PX-SIZE pixels.
+
+Shells out to python3 with freetype-py.  PX-SIZE defaults to 400:
+at 21px a single hinting pixel is ~5% of the measurement, so the
+ratio swings by several percent between adjacent sizes.  At 400px
+the ratio is stable.  Also uses FT_LOAD_NO_HINTING in Python.
+
+The font path is passed via sys.argv rather than embedded in the
+Python source.  `font-info' returns the path as a unibyte string
+containing raw UTF-8 bytes; embedding it with `%S' produces octal
+escapes that Python interprets as Latin-1 codepoints, mangling the
+path.  Passing through argv (after decoding to multibyte) lets
+`call-process' emit the original bytes to `execvp' correctly.
+
+Returns a float or nil if python3, freetype-py, or the font file is
+unavailable."
+  (unless px-size (setq px-size 400))
+  (when (and (executable-find "python3")
+             (stringp font-file)
+             (file-readable-p font-file))
+    (let* ((code "\
+import sys
+try:
+    import freetype
+except ImportError:
+    sys.exit(2)
+try:
+    face = freetype.Face(sys.argv[1])
+    face.set_pixel_sizes(0, int(sys.argv[3]))
+    face.load_char(sys.argv[2], freetype.FT_LOAD_NO_HINTING)
+    print(face.glyph.metrics.height / 64.0)
+except Exception as e:
+    print(e, file=sys.stderr)
+    sys.exit(3)
+")
+           ;; Decode unibyte path to proper multibyte before passing
+           ;; through call-process, which will re-encode to file-name-
+           ;; coding-system (UTF-8 on Linux) when constructing argv.
+           (font-file (if (multibyte-string-p font-file)
+                          font-file
+                        (decode-coding-string font-file 'utf-8))))
+      (with-temp-buffer
+        (when (zerop (ignore-errors
+                       (call-process "python3" nil t nil "-c" code
+                                     font-file
+                                     (char-to-string char)
+                                     (number-to-string px-size))))
+          (string-to-number (string-trim (buffer-string))))))))
+
+(defun emms-lyrics-sync-display--compute-cjk-scale (latin-file cjk-file)
+  "Return x-height ratio LATIN-FILE / CJK-FILE, or nil on measurement failure.
+
+Values < 1.0 mean the CJK font's x-height is taller at the same
+nominal size (typical for FZYouHei vs SauceCodePro); values > 1.0
+mean it is shorter.  Multiply by a perceptual factor > 1.0 to add a
+visual bump beyond pure x-height parity."
+  (let ((lx (emms-lyrics-sync-display--measure-x-height latin-file ?x 400))
+        (cx (emms-lyrics-sync-display--measure-x-height cjk-file   ?x 400)))
+    (when (and lx cx (> lx 0) (> cx 0))
+      (/ lx (float cx)))))
+
+;;;###autoload
+(defun emms-lyrics-sync-display-calibrate-cjk-scale (&optional latin-file cjk-file)
+  "Measure Latin and CJK font x-heights and set `display-cjk-scale'.
+
+Files default to those resolved from `display-font-family' and
+`display-cjk-font'.  Requires freetype-py:
+  pip install --user freetype-py
+
+Prints the measured ratio.  The ratio is the *mathematical* x-height
+match, not necessarily the visually-preferred value — CJK text often
+reads smaller than Latin even at matched x-height (lower stroke
+density per unit area), so many users multiply by 1.05–1.15:
+
+  (setq emms-lyrics-sync-display-cjk-scale
+        (* 1.10 (emms-lyrics-sync-display--compute-cjk-scale L C)))
+
+Run M-x emms-lyrics-sync-display-refresh-font after setting manually."
+  (interactive)
+  (let* ((latin-file (or latin-file
+                         (emms-lyrics-sync-display--font-file-for-family
+                          emms-lyrics-sync-display-font-family)))
+         (cjk-file   (or cjk-file
+                         (emms-lyrics-sync-display--font-file-for-family
+                          emms-lyrics-sync-display-cjk-font))))
+    (unless latin-file
+      (user-error "Cannot resolve Latin font file for %S"
+                  emms-lyrics-sync-display-font-family))
+    (unless cjk-file
+      (user-error "Cannot resolve CJK font file for %S"
+                  emms-lyrics-sync-display-cjk-font))
+    (let ((scale (emms-lyrics-sync-display--compute-cjk-scale
+                  latin-file cjk-file)))
+      (unless scale
+        (user-error "Measurement failed (freetype-py installed?)"))
+      (setq emms-lyrics-sync-display-cjk-scale scale)
+      (emms-lyrics-sync-display-refresh-font)
+      (message "cjk-scale = %.4f  (x-height match; latin=%s cjk=%s)"
+               scale
+               (file-name-nondirectory latin-file)
+               (file-name-nondirectory cjk-file)))))
 
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

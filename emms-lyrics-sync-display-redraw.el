@@ -189,6 +189,9 @@ Cache guard: uses (consp cached) not (listp cached).
         ;; ── Waveform ──────────────────────────────────────────────────────
         (emms-lyrics-sync-display--render-waveform-cached pos-ms)
 
+	;; ── CJK font text properties (header + lyrics) ────────────────────
+        (emms-lyrics-sync-display--apply-cjk-font (point-min) (point-max))
+
         (goto-char (point-min))
         (setq emms-lyrics-sync-display--last-line-idx
               (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1))))))
@@ -211,7 +214,9 @@ Cache guard: uses (consp cached) not (listp cached).
           (delete-region lm-pos (point-max))
           (goto-char lm-pos)
           (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-          (emms-lyrics-sync-display--render-waveform-cached pos-ms)))))))
+          (emms-lyrics-sync-display--render-waveform-cached pos-ms)
+	  ;; ── CJK font text properties for the reinserted lyrics ─────────
+          (emms-lyrics-sync-display--apply-cjk-font lm-pos (point-max))))))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here
