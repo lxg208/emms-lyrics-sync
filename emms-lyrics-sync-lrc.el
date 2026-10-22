@@ -58,7 +58,9 @@
   (start-ms nil :type (or null integer)
             :documentation "Line start in ms; nil for plain (unsynced) text lines.")
   (text     ""  :type string
-            :documentation "Full line text.")
+            :documentation "Visible display text.  For A2 lines, the
+<mm:ss.cc> word markers are stripped; the per-word timings live in
+`words'.")
   (words    nil :type list
             :documentation "List of `emms-lyrics-sync-word'; non-nil only for A2 LRC lines."))
 
@@ -213,14 +215,20 @@ A plain text line (no timestamp) returns (:lines (LIST)) with start-ms = nil."
      ;; ── Synced lyric line(s): one per timestamp ───────────────────────────
      (timestamps
       (let* ((text  (string-trim (substring line pos)))
-             (words (emms-lyrics-sync-lrc--parse-words text)))
+             (words (emms-lyrics-sync-lrc--parse-words text))
+             ;; A2 lines carry <mm:ss.ccc> markers in `text'.  Store the
+             ;; visual text (words concatenated) in `text' so past and
+             ;; future lines display cleanly; the raw markers are only
+             ;; needed during parsing, and the per-word timings live in
+             ;; `words'.
+             (visual (if words
+                         (mapconcat #'emms-lyrics-sync-word-text words "")
+                       text)))
         (list :lines
               (mapcar (lambda (ts)
                         (emms-lyrics-sync-line--make
                          :start-ms ts
-                         :text     text
-                         ;; Each multi-ts copy gets its own word list so
-                         ;; the display engine can mutate faces independently.
+                         :text     visual
                          :words    (copy-sequence words)))
                       (sort timestamps #'<)))))
      ;; ── Plain text (no timestamp found) ──────────────────────────────────
