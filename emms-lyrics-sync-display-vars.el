@@ -565,5 +565,193 @@ Run M-x emms-lyrics-sync-display-refresh-font after setting manually."
                (file-name-nondirectory latin-file)
                (file-name-nondirectory cjk-file)))))
 
+;;;###autoload
+(defun emms-lyrics-sync-display-tune-cjk-scale (scale)
+  "Set `display-cjk-scale' to SCALE and re-render lyrics immediately.
+
+For interactive tuning: play a track, run this with different values
+until the CJK/Latin size ratio looks right on the current machine.
+Faster than restarting Emacs or waiting for the next lyric advance."
+  (interactive "nNew cjk-scale (0.5-2.0): ")
+  (unless (and (numberp scale) (> scale 0.3) (< scale 3.0))
+    (user-error "cjk-scale should be between 0.3 and 3.0"))
+  (setq emms-lyrics-sync-display-cjk-scale scale)
+  (when (buffer-live-p emms-lyrics-sync-display--buffer)
+    (emms-lyrics-sync-display--full-redraw))
+  (message "cjk-scale = %s  (font: %s)"
+           scale
+           emms-lyrics-sync-display-cjk-font))
+
+;;;###autoload
+(defun emms-lyrics-sync-display-scan-cjk-scale (start end step)
+  "Scan `display-cjk-scale' from START to END by STEP.
+
+For each value, redraw the lyrics buffer and measure pixel deltas
+between consecutive lyric lines.  A uniform-delta value means all
+lyric lines render at the same height; a spread (max − min) of ≥ 2
+indicates visible jitter.
+
+Results are written to *emms-lyrics-scale-scan* with a verdict per
+value:
+  uniform    — all lyric lines same height (ideal, no jitter)
+  ok (1px)   — 1px max difference; imperceptible
+  borderline — 2px max difference; usually visible
+  JITTER     — 3+ px difference; clearly visible
+  NO-DATA    — no lyric lines measured; check buffer visibility
+
+The original `display-cjk-scale' is restored after the scan; the
+buffer is redrawn once more at the end to reflect the restored
+state.  The scan pauses the display timer to avoid interference
+from the 100 ms tick during measurement.
+
+Requires a track playing with lyrics visible in a live window.
+
+Usage:
+  M-x emms-lyrics-sync-display-scan-cjk-scale RET
+  Start: 1.05
+  End:   1.20
+  Step:  0.01
+
+Or programmatically:
+  (emms-lyrics-sync-display-scan-cjk-scale 1.05 1.20 0.01)"
+  (interactive
+   (list (read-number "Start cjk-scale: "
+                      (or emms-lyrics-sync-display-cjk-scale 1.0))
+         (read-number "End cjk-scale:   " 1.20)
+         (read-number "Step:            " 0.01)))
+  (unless (buffer-live-p emms-lyrics-sync-display--buffer)
+    (user-error "Lyrics buffer not live; play a track first"))
+  (unless (get-buffer-window emms-lyrics-sync-display--buffer t)
+    (user-error "Lyrics buffer not displayed; \
+run M-x emms-lyrics-sync-display-show first"))
+  (unless (and (numberp start) (numberp end) (numberp step)
+               (< start end) (> step 0))
+    (user-error "Invalid scan range: start=%S end=%S step=%S"
+                start end step))
+  (let* ((orig-scale emms-lyrics-sync-display-cjk-scale)
+         (iterations (1+ (floor (/ (- end start) step))))
+         (results '()))
+    (unwind-protect
+        (progn
+          (emms-lyrics-sync-display--stop-timer)
+          (message "Scanning %d values from %.3f to %.3f (step %.3f)..."
+                   iterations start end step)
+          (dotimes (i iterations)
+            (let* ((scale (+ start (* i step)))
+                   (deltas (progn
+                             (setq emms-lyrics-sync-display-cjk-scale scale)
+                             (emms-lyrics-sync-display--full-redraw)
+                             (redisplay t)
+                             (sit-for 0.05)
+                             (emms-lyrics-sync--measure-lyric-deltas))))
+              (push (cons scale deltas) results)
+              (message "Scanning %.3f (%d/%d)..."
+                       scale (1+ i) iterations)))
+          (setq results (nreverse results))
+          (emms-lyrics-sync-display--show-scan-results
+           start end step results))
+      ;; Restore on any exit path
+      (setq emms-lyrics-sync-display-cjk-scale orig-scale)
+      (when (buffer-live-p emms-lyrics-sync-display--buffer)
+        (emms-lyrics-sync-display--full-redraw))
+      (emms-lyrics-sync-display--start-timer))))
+
+(defun emms-lyrics-sync--measure-lyric-deltas ()
+  "Return list of pixel deltas between consecutive lyric lines.
+
+Restricts measurement to lines between `lyrics-marker' and
+`waveform-marker' so cover-image transitions never appear in the
+result.  Returns nil if the buffer is not displayed in a live window,
+markers are not set, or fewer than 2 lyric lines are visible.
+
+Line positions come from `posn-at-point' on the display window; the
+caller should ensure the window has been redisplayed before calling."
+  (when (and (buffer-live-p emms-lyrics-sync-display--buffer)
+             (markerp emms-lyrics-sync-display--lyrics-marker)
+             (marker-buffer emms-lyrics-sync-display--lyrics-marker)
+             (markerp emms-lyrics-sync-display--waveform-marker)
+             (marker-buffer emms-lyrics-sync-display--waveform-marker))
+    (with-current-buffer emms-lyrics-sync-display--buffer
+      (when-let* ((win (get-buffer-window (current-buffer) t))
+                  (lyrics-start
+                   (marker-position emms-lyrics-sync-display--lyrics-marker))
+                  (waveform-start
+                   (marker-position emms-lyrics-sync-display--waveform-marker))
+                  ((< lyrics-start waveform-start)))
+        (save-excursion
+          (goto-char lyrics-start)
+          (let ((prev-y nil)
+                (deltas '()))
+            (while (< (point) waveform-start)
+              (let ((y (cdr (posn-x-y (posn-at-point (point) win)))))
+                (when (and y prev-y)
+                  (push (- y prev-y) deltas))
+                (when y (setq prev-y y)))
+              (forward-line 1))
+            (nreverse deltas)))))))
+
+(defun emms-lyrics-sync-display--show-scan-results (start end step results)
+  "Populate *emms-lyrics-scale-scan* with a formatted scan table.
+Helper for `emms-lyrics-sync-display-scan-cjk-scale'."
+  (let* ((title (or (and emms-lyrics-sync-core--current-track
+                         (emms-lyrics-sync-track-title
+                          emms-lyrics-sync-core--current-track))
+                    "(no track)"))
+         (highest-uniform nil)
+         (highest-ok nil)
+         (buf (get-buffer-create "*emms-lyrics-scale-scan*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "cjk-scale scan: %.3f → %.3f (step %.3f)\n"
+                        start end step))
+        (insert (format "Track: %s\n"
+                        title))
+        (insert (format "char-height: %d\n\n"
+                        (frame-char-height)))
+        (insert "scale  n   min  max  spread  verdict\n")
+        (insert "-----  --  ---  ---  ------  -------\n")
+        (dolist (r results)
+          (let* ((scale (car r))
+                 (deltas (cdr r))
+                 (n (length deltas))
+                 (mn (and deltas (apply #'min deltas)))
+                 (mx (and deltas (apply #'max deltas)))
+                 (spread (and mn (- mx mn)))
+                 (verdict (cond
+                           ((null deltas)    "NO-DATA")
+                           ((zerop spread)   "uniform")
+                           ((= spread 1)     "ok (1px)")
+                           ((= spread 2)     "borderline")
+                           (t                "JITTER"))))
+            (when (and spread (zerop spread))
+              (setq highest-uniform scale))
+            (when (and spread (<= spread 1))
+              (setq highest-ok scale))
+            (insert (format "%.3f  %2d  %3s  %3s  %6s  %s\n"
+                            scale n
+                            (or mn "-") (or mx "-")
+                            (or spread "-") verdict))))
+        (insert "\nLegend:\n")
+        (insert "  uniform    — all lyric lines same pixel height (ideal)\n")
+        (insert "  ok (1px)   — 1px max difference; imperceptible\n")
+        (insert "  borderline — 2px max difference; usually visible\n")
+        (insert "  JITTER     — 3+ px difference; clearly visible\n")
+        (insert "  NO-DATA    — no lyric lines measured; check visibility\n")
+        (insert "\nSummary:\n")
+        (insert (format "  Highest uniform:     %s\n"
+                        (if highest-uniform
+                            (format "%.3f" highest-uniform)
+                          "none")))
+        (insert (format "  Highest ok (≤1px):   %s\n"
+                        (if highest-ok
+                            (format "%.3f" highest-ok)
+                          "none")))
+        (insert "\nNote: values are machine-specific.  frame-char-height\n")
+        (insert "and integer pixel rounding determine the threshold.\n")
+        (goto-char (point-min))
+        (special-mode)))
+    (display-buffer buf)))
+
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

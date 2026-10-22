@@ -122,6 +122,10 @@ C-c L bindings from `emms-lyrics-sync-mode-map' apply on top."
               line-spacing       0.15
               left-margin-width  1
               right-margin-width 1)
+  ;; Lyrics are read-only; hl-line highlight is visual noise on them,
+  ;; especially since each line's last char can look highlighted even
+  ;; when it is a plain space.
+  (hl-line-mode -1)  
   (emms-lyrics-sync-display--apply-font))
 
 (with-eval-after-load 'emms-playlist-mode
