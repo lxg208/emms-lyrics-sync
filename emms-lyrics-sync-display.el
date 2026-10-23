@@ -238,28 +238,64 @@ Layout adapts to width:
   (and (buffer-live-p emms-lyrics-sync-display--buffer)
        (get-buffer-window emms-lyrics-sync-display--buffer t)))
 
-(defun emms-lyrics-sync-display--create-windows ()        ; ← ADD
-  "Create the lyrics and (if enabled) waveform side windows, atomized."
+(defun emms-lyrics-sync-display--create-windows ()
+  "Create metadata, lyrics, and (if enabled) waveform side windows."
+  ;; 1. Slot 0: metadata (top, fixed height) — gets space first
   (display-buffer-in-side-window
-   (emms-lyrics-sync-display--get-buffer)
+   (emms-lyrics-sync-display--get-metadata-buffer)
    `((side          . ,emms-lyrics-sync-display-side)
      (slot          . 0)
      (window-width  . ,emms-lyrics-sync-display-width)
-     (preserve-size . (t . nil))))
+     (window-height . ,emms-lyrics-sync-display-metadata-lines)
+     (preserve-size . (nil . t))))
+
+  ;; 2. Slot 2: waveform (bottom, fixed height) — gets space second
   (when (and (boundp 'emms-lyrics-sync-waveform-height)
              (> emms-lyrics-sync-waveform-height 0))
     (display-buffer-in-side-window
      (emms-lyrics-sync-display--get-waveform-buffer)
      `((side          . ,emms-lyrics-sync-display-side)
-       (slot          . 1)
+       (slot          . 2)
        (window-height . ,(1+ emms-lyrics-sync-waveform-height))
-       (preserve-size . (nil . t))))
-    (when-let* ((win (get-buffer-window emms-lyrics-sync-display--buffer t))
-                (parent (window-parent win)))
-      (window-make-atom parent))))
+       (preserve-size . (nil . t)))))
+
+  ;; 3. Slot 1: lyrics (middle, flexible) — created last, takes remainder
+  (display-buffer-in-side-window
+   (emms-lyrics-sync-display--get-buffer)
+   `((side          . ,emms-lyrics-sync-display-side)
+     (slot          . 1)
+     (window-width  . ,emms-lyrics-sync-display-width)
+     (preserve-size . (nil . nil))))
+
+  ;; Atomize the group
+  (when-let* ((win (get-buffer-window emms-lyrics-sync-display--buffer t))
+              (parent (window-parent win)))
+    (window-make-atom parent))
+
+  ;; ... existing display-buffer-in-side-window calls unchanged ...
+  ;; ... existing window-make-atom unchanged ...
+
+  ;; Enforce target heights.  `window-height' in the display action is
+  ;; a hint, not a contract — Emacs grows the window to fit content or
+  ;; to balance the layout.  Explicit resize guarantees the configured
+  ;; height, matching the image size from `--cover-pixel-height'.
+  (let ((mw (get-buffer-window emms-lyrics-sync-metadata-buffer t)))
+    (when mw
+      (let ((delta (- emms-lyrics-sync-display-metadata-lines
+                      (window-total-height mw))))
+        (unless (zerop delta)
+          (ignore-errors (window-resize mw delta nil t))))))
+  (when (and (boundp 'emms-lyrics-sync-waveform-height)
+             (> emms-lyrics-sync-waveform-height 0))
+    (let ((ww (get-buffer-window emms-lyrics-sync-waveform-buffer t)))
+      (when ww
+        (let ((delta (- (1+ emms-lyrics-sync-waveform-height)
+                        (window-total-height ww))))
+          (unless (zerop delta)
+            (ignore-errors (window-resize ww delta nil t))))))))
 
 ;;;###autoload
-(defun emms-lyrics-sync-display-show ()                   ; ← REPLACE
+(defun emms-lyrics-sync-display-show ()	; ← REPLACE
   "Show the lyrics sidebar.  Creates windows if not already visible."
   (interactive)
   (unless (emms-lyrics-sync-display--group-visible-p)
@@ -298,16 +334,13 @@ Layout adapts to width:
 (defun emms-lyrics-sync-display--tick ()
   "Periodic 100 ms callback: update elapsed, lyrics, and waveform."
   (when (or (emms-lyrics-sync-display--window)
-            (get-buffer-window emms-lyrics-sync-waveform-buffer t))
+            (get-buffer-window emms-lyrics-sync-waveform-buffer t)
+            (get-buffer-window emms-lyrics-sync-metadata-buffer t))
     (condition-case err
         (let* ((result   emms-lyrics-sync-core--current-result)
                (doc      (when result (emms-lyrics-sync-result-doc result)))
                (pos-ms   (or (emms-lyrics-sync-core--playback-position-ms) 0))
                (new-idx  (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1)))
-
-          ;; 1. Elapsed time in lyrics buffer
-          (when (emms-lyrics-sync-display--window)
-            (emms-lyrics-sync-display--update-elapsed (/ pos-ms 1000.0)))
 
           ;; 2. Lyric line advance
           (unless (= new-idx emms-lyrics-sync-display--last-line-idx)
@@ -321,7 +354,6 @@ Layout adapts to width:
           (cl-incf emms-lyrics-sync-display--tick-counter)
           (when (zerop (mod emms-lyrics-sync-display--tick-counter 10))
             (emms-lyrics-sync-display--redraw-waveform-window pos-ms)))
-
       (error
        (message "emms-lyrics-sync-display tick error: %S" err)))))
 
@@ -349,54 +381,95 @@ Guards:
                                  emms-lyrics-sync-display--current-file-path))))
     (setq emms-lyrics-sync-display--current-file-path fp)
     (if same-track
-        ;; Same track: only lyrics+waveform need updating
-        (progn
-          (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms)
-          ;; Sync idx so next tick doesn't immediately redraw again
-          (setq emms-lyrics-sync-display--last-line-idx
-                (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1)))
-      ;; New track: full redraw
+	;; Same track: only lyrics need updating
+	;; (metadata and waveform are already correct from the new-track render)
+	(progn
+	  (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms)
+	  ;; Sync idx so next tick doesn't immediately redraw again
+	  (setq emms-lyrics-sync-display--last-line-idx
+		(if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1)))
+
+      ;; New track: full redraw of everything
       (setq emms-lyrics-sync-display--last-line-idx -1
             emms-lyrics-sync-display--tick-counter  0)
+
+      ;; Create windows FIRST so the render functions have accurate
+      ;; window geometry (width for centering, height for the resize
+      ;; that --create-windows performs)
+      (emms-lyrics-sync-display-show)
+
+      ;; 1. Lyrics buffer (context window + word overlays)
       (emms-lyrics-sync-display--full-redraw)
-      ;; Within the `else` (new track) branch of on-track-change, after full-redraw:
+
+      ;; 2. Metadata buffer (cover art + header)
+      (when track
+	(emms-lyrics-sync-display--render-metadata-buffer track pos-ms))
+
+      ;; 3. Waveform buffer (composite image)
       (when (and track
 		 (boundp 'emms-lyrics-sync-waveform-height)
 		 (> emms-lyrics-sync-waveform-height 0))
 	(emms-lyrics-sync-display--redraw-waveform-window pos-ms))
-      ;; Kick off async ffprobe tech-info augmentation.
-      ;; When it completes it re-renders only the header tech line.
+
+      ;; 4. Async tech-info augmentation (updates only the metadata buffer
+      ;;    when ffprobe completes, ~100 ms later)
       (when (and track (fboundp 'emms-lyrics-sync-display--ffprobe-augment))
-        (emms-lyrics-sync-display--ffprobe-augment
-         track
-         (lambda ()
-           (when (and (buffer-live-p emms-lyrics-sync-display--buffer)
-                      ;; Still same track?
+	(emms-lyrics-sync-display--ffprobe-augment
+	 track
+	 (lambda ()
+	   (when (and (buffer-live-p emms-lyrics-sync-metadata-buffer)
                       (equal fp emms-lyrics-sync-display--current-file-path))
-             (with-current-buffer emms-lyrics-sync-display--buffer
-               (let ((inhibit-read-only t)
-                     (cur-pos-ms
-                      (or (emms-lyrics-sync-core--playback-position-ms) 0)))
-                 ;; Re-render just the header (cover + lyrics preserved)
-                 ;; Simplest correct approach: full-redraw.
-                 ;; This fires only once per track so it is not expensive.
-                 (emms-lyrics-sync-display--full-redraw)))))))
-      (emms-lyrics-sync-display--start-timer)
-      (emms-lyrics-sync-display-show))))
+             (emms-lyrics-sync-display--render-metadata-buffer
+              track
+              (or (emms-lyrics-sync-core--playback-position-ms) 0))))))
+
+      (emms-lyrics-sync-display--start-timer))))
 
 (defun emms-lyrics-sync-display-on-stop ()
-  "Called when playback stops (not on pause).
-
-Resets the waveform to full-grey at 0:00, because after a stop the
-user cannot return to the previous position (unless Phase 4's seek
-feature is implemented).  Pause is handled separately and leaves the
-display frozen at its current position."
   (when (and (boundp 'emms-lyrics-sync-waveform-height)
              (> emms-lyrics-sync-waveform-height 0))
     (emms-lyrics-sync-display--redraw-waveform-window 0))
   (setq emms-lyrics-sync-display--current-file-path nil)
   (emms-lyrics-sync-display--stop-timer))
 
+(defvar emms-lyrics-sync-metadata-mode-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "q")           #'emms-lyrics-sync-display-hide)
+    (define-key m (kbd "<wheel-up>")   #'ignore)
+    (define-key m (kbd "<wheel-down>") #'ignore)
+    m)
+  "Keymap for `emms-lyrics-sync-metadata-mode'.
+Wheel is disabled (metadata is fixed content).")
+
+(define-derived-mode emms-lyrics-sync-metadata-mode special-mode "EMMS-Metadata"
+  "Major mode for the dedicated cover/metadata buffer."
+  :group 'emms-lyrics-sync
+  (setq-local cursor-type        nil
+              truncate-lines     t
+              line-spacing       0	; ← was 0.15
+              left-margin-width  0
+              right-margin-width 0
+              left-fringe-width  0
+              right-fringe-width 0
+              mode-line-format   nil
+              buffer-read-only   t
+	      ;; CRITICAL: Prevent HiDPI scaling from blowing up the image
+              image-scaling-factor 1.0)
+  (pixel-scroll-precision-mode -1)
+  (emms-lyrics-sync-display--apply-font))
+
+(defun emms-lyrics-sync-display--get-metadata-buffer ()
+  "Return the metadata buffer, creating and configuring it if needed."
+  (unless (buffer-live-p emms-lyrics-sync-metadata-buffer)
+    (setq emms-lyrics-sync-metadata-buffer
+          (get-buffer-create emms-lyrics-sync-display-metadata-buffer-name))
+    (with-current-buffer emms-lyrics-sync-metadata-buffer
+      (emms-lyrics-sync-metadata-mode)))
+  emms-lyrics-sync-metadata-buffer)
+
+(with-eval-after-load 'emms-playlist-mode
+  (set-keymap-parent emms-lyrics-sync-metadata-mode-map
+                     emms-playlist-mode-map))
 
 (provide 'emms-lyrics-sync-display)
 ;;; emms-lyrics-sync-display.el ends here

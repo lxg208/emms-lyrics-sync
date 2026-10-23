@@ -74,62 +74,79 @@ Returns the stable path on success, nil on failure."
             (setq out nil))))
       (and out (file-exists-p out) out))))
 
-(defun emms-lyrics-sync-display--effective-cover-height ()
-  "Return cover art pixel height capped by cover-lines and window space."
-  (let* ((char-h    (frame-char-height))
-         (win       (emms-lyrics-sync-display--window))
-         (win-h     (if win (window-body-height win) 40))
-         ;; Fixed budget for the lyrics buffer only.  Waveform is now
-         ;; in its own window, so its lines are not part of this
-         ;; budget: header 5 + blank-after-header 1 + lyrics lines.
-         (fixed     (+ 5 1 emms-lyrics-sync-display-lyrics-height))
-         ;; Cover itself plus the two newlines that follow it
-         (cover-extra 2)
-         (avail     (max 3 (- win-h fixed cover-extra)))
-         (target-lines (min emms-lyrics-sync-display-cover-lines avail))
-         (target-px    (min emms-lyrics-sync-display-cover-height
-                            (* target-lines char-h))))
-    target-px))
+(defun emms-lyrics-sync-display--cover-pixel-height ()
+  "Return cover art pixel height based on actual window space.
 
-(defun emms-lyrics-sync-display--cover-image (file-path)
-  "Return a (possibly cached) Emacs image for the cover of FILE-PATH, or nil.
+Uses the metadata window's actual body height when displayed, falling
+back to `display-metadata-lines' if the window isn't visible yet.
+This prevents the header from being clipped if Emacs shrinks the
+window to fit the frame."
+  (let* ((char-h (frame-char-height))
+         (win    (get-buffer-window emms-lyrics-sync-metadata-buffer t))
+         (avail  (if win 
+                     (window-body-height win)
+                   emms-lyrics-sync-display-metadata-lines))
+         ;; Reserve 6 lines for the 2-line gap + 4 header lines.
+         ;; Cap at 9 lines so the cover doesn't get absurdly large on tall screens.
+         (lines  (min 10 (max 3 (- avail 6))))
+         (px     (* lines char-h)))
+    (min px emms-lyrics-sync-display-cover-height)))
 
-Resolution order (matches upstream emms-lyrics behavior):
-  1. Embedded art extracted from the file itself (via ffmpeg, disk-cached)
-  2. Sidecar image in the track's directory (cover.jpg / front.jpg / ...)
-
-The cache key includes the effective pixel height so a window resize
-triggers re-resolution at the new size.  Failures are cached as `none'
-internally so expensive extraction is attempted only once per
-(file, height) pair — but `nil' is returned to the caller, never
-`none', so image-handling callers can safely do (when img ...)."
-  (when (and (display-graphic-p) file-path)
-    (let* ((target-h (emms-lyrics-sync-display--effective-cover-height))
-           (key      (list file-path target-h))
-           (cached   (gethash key emms-lyrics-sync-display--cover-cache)))
+(defun emms-lyrics-sync-display--cover-image (file-path height)
+  "Return Emacs image for cover of FILE-PATH at HEIGHT pixels, or nil."
+  (when (and (display-graphic-p) file-path (> height 0))
+    (let* ((key    (list file-path height))
+           (cached (gethash key emms-lyrics-sync-display--cover-cache)))
       (cond
-       ;; Cached failure — return nil, do not retry
        ((eq cached 'none) nil)
-       ;; Cached success
-       (cached            cached)
-       ;; Not yet resolved
+       (cached cached)
        (t
         (let* ((cover (ignore-errors
-                        (or (emms-lyrics-sync-display--extract-embedded-cover
-                             file-path)
-                            (emms-lyrics-sync-display--find-cover-file
-                             file-path))))
+                        (or (emms-lyrics-sync-display--extract-embedded-cover file-path)
+                            (emms-lyrics-sync-display--find-cover-file file-path))))
                (img   (when cover
                         (ignore-errors
-                          (create-image cover nil nil
-                                        :height target-h
-                                        :scale  1.0)))))
+                          (create-image cover nil nil :height height :scale 1.0)))))
           (if img
-              (progn
-                (puthash key img emms-lyrics-sync-display--cover-cache)
-                img)
+              (progn (puthash key img emms-lyrics-sync-display--cover-cache) img)
             (puthash key 'none emms-lyrics-sync-display--cover-cache)
             nil)))))))
+
+(defun emms-lyrics-sync-display--placeholder-image (track height)
+  "Generate deterministic placeholder SVG for TRACK at HEIGHT pixels.
+
+Background color and initial derive from the file path hash, so the
+same track always produces the same image.  Returns nil if SVG is
+unsupported or HEIGHT is zero."
+  (when (and (display-graphic-p) (> height 0))
+    (let* ((key    (or (and track (emms-lyrics-sync-track-file-path track)) ""))
+           (hash   (md5 key))
+           (r      (+ 40 (/ (string-to-number (substring hash 0 2) 16) 3)))
+           (g      (+ 60 (/ (string-to-number (substring hash 2 4) 16) 3)))
+           (b      (+ 80 (/ (string-to-number (substring hash 4 6) 16) 3)))
+           (color  (format "#%02x%02x%02x" r g b))
+           (artist (and track (emms-lyrics-sync-track-artist track)))
+           (initial (if (and artist (> (length artist) 0))
+                        (let ((c (substring artist 0 1)))
+                          (if (string-match-p "[<>&\"']" c) "♪" c))
+                      "♪"))
+           (font-sz (round (* height 0.45)))
+           (svg (format (concat "<svg xmlns='http://www.w3.org/2000/svg'"
+                                " width='%d' height='%d'>"
+                                "<rect width='100%%' height='100%%' fill='%s'/>"
+                                "<text x='50%%' y='52%%' fill='white' font-size='%d'"
+                                " font-family='sans-serif' text-anchor='middle'"
+                                " dominant-baseline='central'>%s</text></svg>")
+                        height height color font-sz initial)))
+      (ignore-errors (create-image svg 'svg t :scale 1.0)))))
+
+(defun emms-lyrics-sync-display--cover-or-placeholder (track height)
+  "Return cover image for TRACK at HEIGHT, or deterministic placeholder.
+Placeholder only generated when `display-cover-placeholder' is non-nil."
+  (or (emms-lyrics-sync-display--cover-image
+       (emms-lyrics-sync-track-file-path track) height)
+      (when emms-lyrics-sync-display-cover-placeholder
+        (emms-lyrics-sync-display--placeholder-image track height))))
 
 
 ;;; ── ffprobe Tech-Info Augmentation ───────────────────────────────────────────
@@ -212,22 +229,17 @@ internally so expensive extraction is attempted only once per
           (number-to-string khz)
         (format "%d.%d" khz (/ rem 100))))))
 
-(defun emms-lyrics-sync-display--render-header (track elapsed-s)
+(defun emms-lyrics-sync-display--render-header (track)
   "Insert the metadata header for TRACK at point.
-Returns (elapsed-buf-start . elapsed-buf-end) for marker-based incremental
-updates, or nil if the elapsed line was not inserted.
 
-Header layout:
+Layout:
   Line 1: Artist[ - Composer]             ← artist-face
-  Line 2: Album                           ← album-face  (omitted if absent)
+  Line 2: Album                           ← album-face (omitted if absent)
   Line 3: [Track. ]Title                  ← title-face
-  Line 4: CODEC | bits/kHz | kbps | ch   ← tech-face   (omitted if all nil)
-  Line 5: elapsed / duration              ← elapsed-face / duration-face
+  Line 4: CODEC | bits/kHz | kbps | ch   ← tech-face (omitted if all nil)
 
-IMPORTANT: l5-suffix (\"/ 4:55\") uses emms-lyrics-sync-duration-face,
-NOT tech-face.  Both faces were previously the same grey as past-line-face
-which made them unreadable.  tech-face is now steel-blue and duration-face
-is a lighter blue-grey — both clearly distinct from the grey past lyrics."
+Elapsed time and duration are displayed in the waveform mode line,
+not here.  Returns nil."
   (let* ((artist   (emms-lyrics-sync-track-artist          track))
          (composer (emms-lyrics-sync-track-composer         track))
          (album    (emms-lyrics-sync-track-album            track))
@@ -238,30 +250,19 @@ is a lighter blue-grey — both clearly distinct from the grey past lyrics."
          (sr       (emms-lyrics-sync-track-sample-rate      track))
          (kbps     (emms-lyrics-sync-track-bitrate          track))
          (ch       (emms-lyrics-sync-track-channels         track))
-         (dur      (emms-lyrics-sync-track-duration         track))
-         ;; Line 1
          (l1 (concat (or artist "Unknown Artist")
                      (if (and composer (not (string-empty-p composer)))
                          (concat " - " composer) "")))
-         ;; Line 2
          (l2 (when (and album (not (string-empty-p album))) album))
-         ;; Line 3
          (l3 (concat (if trknum (format "%s. " trknum) "")
                      (or title "Unknown Title")))
-         ;; Line 4
          (sr-s   (emms-lyrics-sync-display--sr-string sr))
          (bps/sr (cond ((and bps sr-s) (format "%d/%s" bps sr-s))
                        (sr-s           sr-s)
                        (t              nil)))
          (kbps-s (when (and kbps (> kbps 0)) (format "%d kbps" kbps)))
          (l4     (let ((parts (delq nil (list codec bps/sr kbps-s ch))))
-                   (when parts (mapconcat #'identity parts " | "))))
-         ;; Line 5
-         (elapsed-str (emms-lyrics-sync-display--format-time elapsed-s))
-         (dur-str     (emms-lyrics-sync-display--format-time dur))
-         (l5-suffix   (concat " / " dur-str))
-         elapsed-start elapsed-end)
-    ;; ── Insert lines ─────────────────────────────────────────────────────────
+                   (when parts (mapconcat #'identity parts " | ")))))
     (insert (propertize (emms-lyrics-sync-display--center l1)
                         'face 'emms-lyrics-sync-artist-face) "\n")
     (when l2
@@ -272,22 +273,7 @@ is a lighter blue-grey — both clearly distinct from the grey past lyrics."
     (when l4
       (insert (propertize (emms-lyrics-sync-display--center l4)
                           'face 'emms-lyrics-sync-tech-face) "\n"))
-    ;; Line 5: two halves with different faces, record elapsed span via (point)
-    (let* ((l5-full (concat elapsed-str l5-suffix))
-           (pad     (max 0 (/ (- (emms-lyrics-sync-display--body-width)
-                                  (string-width l5-full))
-                               2))))
-      (insert (make-string pad ?\s))
-      (setq elapsed-start (point))
-      (insert (propertize elapsed-str 'face 'emms-lyrics-sync-elapsed-face))
-      (setq elapsed-end (point))
-      ;; ── KEY FIX: duration uses duration-face, NOT tech-face ──────────────
-      ;; Previously both l5-suffix and l4 used tech-face (same grey as
-      ;; past-line-face).  Now duration-face is a lighter blue-grey that
-      ;; reads as "metadata" without clashing with the teal elapsed face.
-      (insert (propertize l5-suffix 'face 'emms-lyrics-sync-duration-face)))
-    (insert "\n")
-    (cons elapsed-start elapsed-end)))
+    nil))
 
 ;;; ── Lyrics: Wrapping Helper ──────────────────────────────────────────────────
 

@@ -335,17 +335,6 @@ additional subtraction is needed."
          (pad   (max 0 (/ (- width len) 2))))
     (concat (make-string pad ?\s) str)))
 
-;; In emms-lyrics-sync-display-vars.el
-(defcustom emms-lyrics-sync-display-cover-lines 10
-  "Target cover art height in character lines.
-Effective pixel height is `cover-lines × frame-char-height', clamped by
-`emms-lyrics-sync-display-cover-height' (hard upper bound) and by the
-space available in the window after reserving room for the header,
-lyrics, and waveform.  This makes the cover occupy the same visual
-proportion on every machine regardless of DPI or scaling mode."
-  :type  'integer
-  :group 'emms-lyrics-sync)
-
 (defcustom emms-lyrics-sync-display-cover-height 900
   "Hard upper bound on cover art pixel height.  Rarely reached.
 The effective height is min(cover-height, cover-lines × char-height,
@@ -797,6 +786,59 @@ Helper for `emms-lyrics-sync-display-scan-cjk-scale'."
         (goto-char (point-min))
         (special-mode)))
     (display-buffer buf)))
+
+;;;###autoload
+(defun emms-lyrics-sync-display-tune-metadata-lines (n)
+  "Set `display-metadata-lines' to N and re-show the sidebar.
+Hides and shows the sidebar so `--create-windows' re-applies the
+explicit resize."
+  (interactive "nNew metadata-lines: ")
+  (unless (and (integerp n) (>= n 6))
+    (user-error "metadata-lines must be >= 6 (5 header + 1 cover)"))
+  (setq emms-lyrics-sync-display-metadata-lines n)
+  (when (emms-lyrics-sync-display--group-visible-p)
+    (emms-lyrics-sync-display-hide)
+    (emms-lyrics-sync-display-show))
+  (when emms-lyrics-sync-core--current-track
+    (emms-lyrics-sync-display--render-metadata-buffer
+     emms-lyrics-sync-core--current-track
+     (or (emms-lyrics-sync-core--playback-position-ms) 0)))
+  (message "metadata-lines = %d" n))
+
+(defcustom emms-lyrics-sync-display-metadata-buffer-name "*emms-lyrics-metadata*"
+  "Name of the dedicated cover/metadata buffer."
+  :type 'string :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-metadata-lines 16
+  "Total character lines allocated to the metadata window.
+
+The header occupies up to 5 lines (artist / album / title / tech /
+time), leaving `metadata-lines - 5' lines of vertical space for the
+cover image.  Default 15 therefore gives a 10-line cover, matching
+the old `display-cover-lines' default.  On small screens, reduce this
+(M14: try 10–12) to give the lyrics window more room."
+  :type 'integer :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-metadata-scale 1.0
+  "Additional scale factor applied to the metadata buffer's font height.
+Multiplied by `display-font-scale' to give the effective metadata
+height.  Set to 1.15 for slightly larger artist/title text, 0.85 for
+a denser header."
+  :type 'number :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-display-cover-placeholder t
+  "When non-nil, generate a deterministic placeholder image for tracks
+with no embedded or sidecar cover art.  The placeholder is a colored
+square (color derived from a hash of the file path) with the artist's
+initial rendered in the center."
+  :type 'boolean :group 'emms-lyrics-sync)
+
+(defvar emms-lyrics-sync-metadata-buffer nil
+  "The metadata display buffer.")
+
+;; Buffer-local: set by --render-metadata-buffer, read by --update-elapsed
+(defvar-local emms-lyrics-sync-display--elapsed-marker nil)
+(defvar-local emms-lyrics-sync-display--elapsed-end-marker nil)
 
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

@@ -24,9 +24,8 @@
 ;;; ── Full Buffer Redraw ───────────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--full-redraw ()
-  "Erase and repopulate the entire lyrics buffer for the current track."
-  (let* ((track  emms-lyrics-sync-core--current-track)
-         (result emms-lyrics-sync-core--current-result)
+  "Render the lyrics buffer for the current track."
+  (let* ((result emms-lyrics-sync-core--current-result)
          (doc    (when result (emms-lyrics-sync-result-doc result)))
          (pos-ms (or (emms-lyrics-sync-core--playback-position-ms) 0))
          (buf    (emms-lyrics-sync-display--get-buffer)))
@@ -36,41 +35,10 @@
         (emms-lyrics-sync-display--clear-sung-overlays)
         (emms-lyrics-sync-display--reset-word-overlay)
         (setq emms-lyrics-sync-display--word-positions nil)
-
-        ;; ── Cover art ─────────────────────────────────────────────────────
-        (when track
-          (let* ((fp  (emms-lyrics-sync-track-file-path track))
-                 (img (emms-lyrics-sync-display--cover-image fp)))
-            (when img
-              (let* ((img-w    (or (car (image-size img t)) 0))
-                     (char-w   (frame-char-width))
-                     (win-px-w (* (emms-lyrics-sync-display--body-width) char-w))
-                     (pad-ch   (max 0 (floor (/ (- win-px-w img-w)
-                                                2.0 char-w)))))
-                (insert (make-string pad-ch ?\s))
-                (insert-image img)
-                (insert "\n\n")))))
-
-        ;; ── Metadata header ───────────────────────────────────────────────
-        (when track
-          (let ((erange (emms-lyrics-sync-display--render-header
-                         track (/ pos-ms 1000.0))))
-            (setq emms-lyrics-sync-display--elapsed-marker
-                  (copy-marker (car erange) nil)
-                  emms-lyrics-sync-display--elapsed-end-marker
-                  (copy-marker (cdr erange) t))))
-        (insert "\n")
-
-        ;; ── Lyrics marker (NIL type — never advances) ─────────────────────
         (setq emms-lyrics-sync-display--lyrics-marker
               (copy-marker (point) nil))
-
-        ;; ── Lyrics ────────────────────────────────────────────────────────
         (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-
-	;; ── CJK font text properties (header + lyrics) ────────────────────
         (emms-lyrics-sync-display--apply-cjk-font (point-min) (point-max))
-
         (goto-char (point-min))
         (setq emms-lyrics-sync-display--last-line-idx
               (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1))))))
@@ -175,6 +143,30 @@
          (t
           (emms-lyrics-sync-display--insert-flat-line win-chars pos-s dur))))
         (force-mode-line-update))))
+
+(defun emms-lyrics-sync-display--render-metadata-buffer (track pos-ms)
+  "Render cover + header for TRACK into the metadata buffer at POS-MS."
+  (when (buffer-live-p emms-lyrics-sync-metadata-buffer)
+    (with-current-buffer emms-lyrics-sync-metadata-buffer
+      (let* ((inhibit-read-only t)
+             (char-w (frame-char-width))
+             (body-w (if-let ((win (get-buffer-window (current-buffer) t)))
+                         (window-body-width win)
+                       65))
+             (win-px (* body-w char-w)))
+        (erase-buffer)
+        (when track
+          (let* ((h   (emms-lyrics-sync-display--cover-pixel-height))
+                 (img (emms-lyrics-sync-display--cover-or-placeholder track h)))
+            (when img
+              (let* ((img-w (or (car (image-size img t)) 0))
+                     (pad   (max 0 (floor (/ (- win-px img-w) 2.0 char-w)))))
+                (insert (make-string pad ?\s))
+                (insert-image img)
+                (insert "\n\n"))))
+          (emms-lyrics-sync-display--render-header track)
+          (emms-lyrics-sync-display--apply-cjk-font (point-min) (point-max))
+          (goto-char (point-min)))))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here
