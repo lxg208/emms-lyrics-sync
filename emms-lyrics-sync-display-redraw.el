@@ -98,23 +98,19 @@
 
 ;;; ── Waveform buffer renderer ─────────────────────────────────────────────────
 
+(defun emms-lyrics-sync-display--insert-flat-line (win-chars pos-s dur)
+  "Insert a vertically centered flat line placeholder."
+  (let ((above (max 0 (/ (1- emms-lyrics-sync-waveform-height) 2))))
+    (when (> above 0)
+      (insert (make-string above ?\n)))
+    (when (and (get-buffer-window (current-buffer) t)
+               (> (or emms-lyrics-sync-waveform-side-padding 0) 0))
+      (insert (make-string emms-lyrics-sync-waveform-side-padding ?\s)))
+    (insert (emms-lyrics-sync-waveform--render-unicode-flat
+             win-chars pos-s dur))))
+
 (defun emms-lyrics-sync-display--redraw-waveform-window (pos-ms)
-  "Erase and repaint the waveform buffer with a fresh composite at POS-MS.
-
-Unlike the previous in-buffer marker-and-partial-redraw approach,
-this function operates on a dedicated buffer that contains nothing
-but the waveform image.  No coordination with cover, header, or
-lyric content is required: the buffer is erased and repainted in
-one pass.
-
-Reuses the existing `emms-lyrics-sync-waveform--composite-at-point'
-and `--ensure-pngs' machinery.  On first track play, when the PNGs
-do not yet exist, `--ensure-pngs' starts async generation and the
-callback re-invokes this function when they are ready.
-
-Updates the cached mode line string (see
-`emms-lyrics-sync-waveform--cached-mode-line') so the mode line
-persists correctly after playback stops."
+  "Erase and repaint the waveform buffer with a fresh composite at POS-MS."
   (when (and (buffer-live-p emms-lyrics-sync-waveform-buffer)
              (fboundp 'emms-lyrics-sync-waveform--composite-at-point))
     (with-current-buffer emms-lyrics-sync-waveform-buffer
@@ -125,26 +121,21 @@ persists correctly after playback stops."
              (win       (get-buffer-window (current-buffer) t))
              (char-w    (frame-char-width))
              (char-h    (frame-char-height))
-	     ;; win-chars now subtracts the padding on both sides:
-	     (win-chars (if win
-			    (max 4 (- (window-body-width win)
-				      (* 2 emms-lyrics-sync-waveform-side-padding)))
-			  60))
-	     ;; px-w stays as win-chars × char-w (same as before)
+             (win-chars (if win
+                            (max 4 (- (window-body-width win)
+                                      (* 2 emms-lyrics-sync-waveform-side-padding)))
+                          60))
              (px-w      (let ((w (* win-chars char-w)))
                           (if (oddp w) (1+ w) w)))
-	     (px-h      (let* ((raw (* emms-lyrics-sync-waveform-height char-h))
-			       (rem (mod raw 4)))
-			  (if (zerop rem) raw (+ raw (- 4 rem)))))
+             ;; Floor to a multiple of 4 so the image never overflows the body
+             (px-h      (let* ((raw (* emms-lyrics-sync-waveform-height char-h))
+                               (rem (mod raw 4)))
+                          (- raw rem)))
              (pos-s     (/ (float pos-ms) 1000.0)))
         (setq-local emms-lyrics-sync-waveform--cached-mode-line
                     (emms-lyrics-sync-display--format-waveform-mode-line
                      pos-ms track))
         (erase-buffer)
-	;; NEW: left padding; right padding is implicit because win-chars
-	;; was reduced by 2× padding, so the image doesn't reach the body edge.
-	(when (and win (> emms-lyrics-sync-waveform-side-padding 0))
-	  (insert (make-string emms-lyrics-sync-waveform-side-padding ?\s)))
         (cond
          ;; ── PNG mode ─────────────────────────────────────────────────────
          ((and fp (emms-lyrics-sync-waveform--use-png-p))
@@ -155,6 +146,9 @@ persists correctly after playback stops."
                    (= (plist-get cached :px-h) px-h)
                    (file-exists-p (plist-get cached :played))
                    (file-exists-p (plist-get cached :remaining)))
+              ;; Success: pad left, then insert image
+              (when (and win (> emms-lyrics-sync-waveform-side-padding 0))
+                (insert (make-string emms-lyrics-sync-waveform-side-padding ?\s)))
               (let ((cursor-x (if (and dur (> dur 0))
                                   (max 1 (min (1- px-w)
                                               (round (* (/ pos-s (float dur))
@@ -165,8 +159,8 @@ persists correctly after playback stops."
                  (plist-get cached :remaining)
                  cursor-x px-h pos-s dur)))
              (t
-              (insert (emms-lyrics-sync-waveform--render-unicode-flat
-                       win-chars pos-s dur))
+              ;; Pending: centered flat line
+              (emms-lyrics-sync-display--insert-flat-line win-chars pos-s dur)
               (unless (eq cached 'pending)
                 (emms-lyrics-sync-waveform--ensure-pngs
                  fp px-w px-h
@@ -179,9 +173,8 @@ persists correctly after playback stops."
                             0)))))))))))
          ;; ── Unicode fallback (terminal or no ffmpeg) ─────────────────────
          (t
-          (insert (emms-lyrics-sync-waveform--render-unicode-flat
-                   win-chars pos-s dur))))
-        (force-mode-line-update)))))
+          (emms-lyrics-sync-display--insert-flat-line win-chars pos-s dur))))
+        (force-mode-line-update))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here

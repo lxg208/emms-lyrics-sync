@@ -173,12 +173,15 @@ The mode line shows elapsed/duration plus compact artist/title."
   :group 'emms-lyrics-sync
   (setq-local cursor-type         nil
               truncate-lines      t
+	      line-spacing        0
               left-margin-width   0
               right-margin-width  0
 	      left-fringe-width   0
               right-fringe-width  0
               mode-line-format
-              '((:eval emms-lyrics-sync-waveform--cached-mode-line))))
+              '((:eval emms-lyrics-sync-waveform--cached-mode-line)))
+  (pixel-scroll-precision-mode -1)
+  )
 
 (defun emms-lyrics-sync-display--get-waveform-buffer ()   ; ← ADD
   "Return the waveform buffer, creating and configuring it if needed."
