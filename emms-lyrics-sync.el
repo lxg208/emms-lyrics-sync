@@ -64,11 +64,25 @@
 
 (defvar emms-lyrics-sync-mode-map
   (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "C-c L s") #'emms-lyrics-sync-search)
-    (define-key m (kbd "C-c L n") #'emms-lyrics-sync-next-source)
-    (define-key m (kbd "C-c L t") #'emms-lyrics-sync-toggle-window)
+    (define-key m (kbd "<f3> L s") #'emms-lyrics-sync-search)
+    (define-key m (kbd "<f3> L n") #'emms-lyrics-sync-next-source)
+    (define-key m (kbd "<f3> L t") #'emms-lyrics-sync-toggle-window)
+    (define-key m (kbd "<f3> L c") #'emms-lyrics-sync-display-tune-cjk-scale)
+    (define-key m (kbd "<f3> L r") #'emms-lyrics-sync-reload)
+    (define-key m (kbd "<f3> L o") #'emms-lyrics-sync-open-sidecar)
     m)
-  "Keymap for `emms-lyrics-sync-mode'.")
+  "Keymap for `emms-lyrics-sync-mode'.
+
+Prefix is <f3> L (uppercase).  <f3> l (lowercase) is reserved for
+`yxz11-copy-paste-lines' in the user's personal `yxz11-map'.
+
+WARNING: This map is active in EVERY buffer because
+`emms-lyrics-sync-mode' is a global minor mode.  Never bind
+single-letter keys here — they would shadow those keys in every
+buffer.  Buffer-specific bindings belong in the corresponding
+mode's map (`emms-lyrics-sync-display-mode-map',
+`emms-lyrics-sync-waveform-mode-map',
+`emms-lyrics-sync-results-mode-map').")
 
 ;;; ── Minor Mode ───────────────────────────────────────────────────────────────
 
@@ -142,12 +156,15 @@ Extracts metadata from the current EMMS track and kicks off the fetch pipeline."
 
 (defun emms-lyrics-sync--on-track-stop ()
   "Called by `emms-player-stopped-hook' and `emms-player-finished-hook'."
+  ;; Display handler runs first so it can read `current-track' (duration,
+  ;; artist, title) before core clears it.  Each handler has independent
+  ;; error handling so a failure in one doesn't skip the other.
   (condition-case err
-      (progn
-        (emms-lyrics-sync-core--on-stop)
-        (emms-lyrics-sync-display-on-stop))
-    (error
-     (message "emms-lyrics: error on track stop: %S" err))))
+      (emms-lyrics-sync-display-on-stop)
+    (error (message "emms-lyrics: display stop error: %S" err)))
+  (condition-case err
+      (emms-lyrics-sync-core--on-stop)
+    (error (message "emms-lyrics: core stop error: %S" err))))
 
 (defun emms-lyrics-sync--on-track-pause ()
   "Called by `emms-player-paused-hook'.

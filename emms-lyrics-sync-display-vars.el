@@ -168,6 +168,20 @@ with the default values 3 + 6 + 3 = 12."
   :type  'number
   :group 'emms-lyrics-sync)
 
+(defcustom emms-lyrics-sync-waveform-side-padding 2
+  "Character columns of padding on each side of the waveform image.
+
+The image is generated at `(window-body-width - 2 × this)' character
+columns wide and centered with `this' spaces of padding on the left;
+the right side auto-fills with the remaining buffer space.  Set to 0
+to have the image fill the body edge-to-edge.
+
+Two characters (~26 px at typical font sizes) provides visible
+breathing room from the window edges without materially reducing
+waveform resolution."
+  :type 'integer
+  :group 'emms-lyrics-sync)
+
 ;;; ── Faces ────────────────────────────────────────────────────────────────────
 ;;
 ;; IMPORTANT: Do NOT add :weight bold or :height to faces used in header
@@ -275,9 +289,6 @@ current and past lines."
 (defvar emms-lyrics-sync-display--lyrics-marker nil
   "NIL-type marker at the start of the lyrics section.")
 
-(defvar emms-lyrics-sync-display--waveform-marker nil
-  "NIL-type marker at the start of the waveform bar content.")
-
 (defvar emms-lyrics-sync-display--current-file-path nil
   "File path of the track currently rendered in the lyrics buffer.")
 
@@ -307,12 +318,18 @@ current and past lines."
 
 (defun emms-lyrics-sync-display--body-width ()
   "Return the usable body width of the lyrics window in characters.
-Subtracts 2 for the left and right margin widths set in display.el."
+`window-body-width' already excludes fringes and margins, so no
+additional subtraction is needed."
   (let ((win (emms-lyrics-sync-display--window)))
-    (if win (- (window-body-width win) 2) 60)))
+    (if win (window-body-width win) 60)))
 
 (defun emms-lyrics-sync-display--center (str)
   "Return STR padded with spaces to center it in the lyrics window."
+  (let* ((width (emms-lyrics-sync-display--body-width))
+         (len   (string-width str))
+         (pad   (max 0 (ceiling (- width len) 2))))   ; ← was floor
+    (concat (make-string pad ?\s) str)))
+(defun emms-lyrics-sync-display--center (str)
   (let* ((width (emms-lyrics-sync-display--body-width))
          (len   (string-width str))
          (pad   (max 0 (/ (- width len) 2))))
@@ -359,6 +376,34 @@ Takes precedence over `emms-lyrics-sync-display-font-family'.
 Call `emms-lyrics-sync-display-refresh-font' after changing this."
   :type '(choice (const :tag "Use default" nil) string)
   :group 'emms-lyrics-sync)
+
+(defcustom emms-lyrics-sync-waveform-buffer-name "*emms-lyrics-waveform*"
+  "Name of the dedicated waveform buffer.
+
+The waveform lives in its own side window below the lyrics window,
+in a fixed-height, fixed-position viewport.  Because the window
+height is fixed, the waveform image cannot move vertically as lyric
+lines of different heights scroll past above it.  This decouples
+CJK font scaling (`display-cjk-scale') from line-height jitter: the
+scale becomes a pure aesthetic choice, unbounded by integer-pixel
+rounding thresholds."
+  :type 'string
+  :group 'emms-lyrics-sync)
+
+(defvar emms-lyrics-sync-waveform-buffer nil
+  "The waveform display buffer.")
+
+(defcustom emms-lyrics-sync-waveform-center-line 1
+  "Thickness of the center line in pixels.
+A thin line helps visualize silence without overpowering quiet sections.
+1 is a standard hairline; 2 is more visible on high-DPI screens."
+  :type 'integer
+  :group 'emms-lyrics-sync)
+
+(defvar-local emms-lyrics-sync-waveform--cached-mode-line "  0:00  "
+  "Cached mode line string, updated on each waveform redraw.
+Persists after playback stops so the mode line stays informative
+even after `emms-lyrics-sync-core--on-stop' clears `current-track'.")
 
 ;;; ── CJK font application ─────────────────────────────────────────────────────
 

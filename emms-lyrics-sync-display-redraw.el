@@ -3,11 +3,6 @@
 ;; Created : 2026-06-13 16:00 UTC
 ;; Updated : 2026-06-13 18:40 UTC
 ;; Changes :
-;;   • --update-waveform-cursor: fast path calls --insert-composite (no \n)
-;;     then adds \n — CORRECT.  Fallback no longer calls --insert-at-point
-;;     (which would produce a double \n because the separator \n before the
-;;     waveform-marker is preserved by delete-region).  Fallback now inserts
-;;     unicode flat bar + \n instead.
 ;;   • All cache guards use (consp cached) not (listp cached).
 ;;
 ;; Copyright (C) 2026  emms-lyrics-sync contributors
@@ -25,119 +20,6 @@
 ;;; ── Forward declaration ──────────────────────────────────────────────────────
 (declare-function emms-lyrics-sync-display--get-buffer
                   "emms-lyrics-sync-display")
-
-;;; ── Waveform: Cached Render ──────────────────────────────────────────────────
-
-(defun emms-lyrics-sync-display--render-waveform-cached (pos-ms)
-  "Insert waveform at point using the PNG cache; always sets waveform-marker.
-
-Invariant: delegates entirely to `emms-lyrics-sync-waveform--insert-at-point'
-which inserts: separator \\n → waveform-marker (NIL) → content → trailing \\n."
-  (let* ((track     emms-lyrics-sync-core--current-track)
-	 (fp        (and track (emms-lyrics-sync-track-file-path track)))
-	 (duration  (and track (emms-lyrics-sync-track-duration track)))
-	 (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
-	 (dims      (emms-lyrics-sync-waveform--target-dimensions win-chars))
-	 (px-w      (car dims))
-	 (px-h      (cdr dims))
-	 (pos-s     (/ (float pos-ms) 1000.0)))
-    (cond
-     ;; ── PNG mode ─────────────────────────────────────────────────────────
-     ((and fp
-           (fboundp 'emms-lyrics-sync-waveform--use-png-p)
-           (emms-lyrics-sync-waveform--use-png-p)
-           (fboundp 'emms-lyrics-sync-waveform--insert-at-point))
-      (emms-lyrics-sync-waveform--insert-at-point
-       fp pos-s duration px-w px-h))
-     ;; ── Unicode flat bar fallback (terminal) ──────────────────────────────
-     ((fboundp 'emms-lyrics-sync-waveform--render-unicode-flat)
-      (insert "\n")
-      (setq emms-lyrics-sync-display--waveform-marker
-            (copy-marker (point) nil))
-      (insert (emms-lyrics-sync-waveform--render-unicode-flat
-               win-chars pos-s duration))
-      (insert "\n")))))
-
-;;; ── Waveform: Cursor Update ──────────────────────────────────────────────────
-
-(defun emms-lyrics-sync-display--update-waveform-cursor (pos-ms)
-  "Replace only the waveform bar with an updated playback cursor at POS-MS.
-
-Marker invariant:
-  waveform-marker is NIL-type — it stays at the bar start.
-  delete-region removes from wf-start to (point-max), preserving the
-  separator \\n that sits BEFORE wf-start.  We then insert new content
-  followed by \\n.  We must NOT call --insert-at-point here because that
-  function inserts its own separator \\n which would produce a double
-  \\n.
-
-  The fast path calls --composite-at-point with a precomputed cursor-x
-  and inserts a trailing \n.  We must NOT call --insert-at-point here
-  because that function inserts its own separator \n which would produce
-  a double \n.
-
-Cache guard: uses (consp cached) not (listp cached).
-  (listp nil) → t — nil passes, (plist-get nil :px-w) → nil → crash.
-  (consp nil) → nil — correctly excluded."
-  (when (and (buffer-live-p emms-lyrics-sync-display--buffer)
-             (markerp emms-lyrics-sync-display--waveform-marker)
-             (marker-buffer emms-lyrics-sync-display--waveform-marker))
-    (let* ((track    emms-lyrics-sync-core--current-track)
-           (fp       (and track (emms-lyrics-sync-track-file-path track)))
-           (duration (and track (emms-lyrics-sync-track-duration track)))
-           ;; consp: nil (cache miss) and 'pending both excluded correctly
-           (cached   (and fp
-                          (boundp 'emms-lyrics-sync-waveform--png-cache)
-                          (gethash fp emms-lyrics-sync-waveform--png-cache))))
-      (when (consp cached)
-        (with-current-buffer emms-lyrics-sync-display--buffer
-          (save-excursion
-	    (let* ((inhibit-read-only t)
-		    (wf-start  (marker-position
-				emms-lyrics-sync-display--waveform-marker))
-		    (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
-		    (dims      (emms-lyrics-sync-waveform--target-dimensions win-chars))
-		    (px-w      (car dims))
-		    (px-h      (cdr dims))
-		    (pos-s     (/ (float pos-ms) 1000.0)))
-               (when (and (integerp wf-start)
-			  (<= wf-start (point-max)))
-		 (delete-region wf-start (point-max))
-		 (goto-char wf-start)
-		 (cond
-		  ;; ── PNG fast path: dimensions match, files exist ───────────
-		  ((and (fboundp 'emms-lyrics-sync-waveform--use-png-p)
-			(emms-lyrics-sync-waveform--use-png-p)
-			(= (plist-get cached :px-w) px-w)
-			(= (plist-get cached :px-h) px-h)
-			(file-exists-p (plist-get cached :played))
-			(file-exists-p (plist-get cached :remaining))
-			(fboundp 'emms-lyrics-sync-waveform--composite-at-point))
-                   (let ((cursor-x (if (and duration (> duration 0))
-                                       (max 1 (min (1- px-w)
-                                                   (round (* (/ pos-s (float duration))
-                                                             px-w))))
-                                     0)))
-                     (emms-lyrics-sync-waveform--composite-at-point
-                      (plist-get cached :played)
-                      (plist-get cached :remaining)
-                      cursor-x px-h pos-s duration))
-                   (insert "\n"))
-
-		  ;; ── Window resized or PNG unavailable ─────────────────────
-		  ;; Do NOT call --insert-at-point here — it adds a separator
-		  ;; \n which would produce a double \n (the separator before
-		  ;; waveform-marker is preserved by delete-region above).
-		  ;; Instead show unicode flat bar; the next full redraw
-		  ;; (triggered by PNG regeneration callback) will fix it.
-		  ((fboundp 'emms-lyrics-sync-waveform--render-unicode-flat)
-                   (insert (emms-lyrics-sync-waveform--render-unicode-flat
-                            win-chars pos-s duration))
-                   (insert "\n"))
-
-		  ;; ── Last resort ───────────────────────────────────────────
-		  (t
-                   (insert "\n")))))))))))
 
 ;;; ── Full Buffer Redraw ───────────────────────────────────────────────────────
 
@@ -186,9 +68,6 @@ Cache guard: uses (consp cached) not (listp cached).
         ;; ── Lyrics ────────────────────────────────────────────────────────
         (emms-lyrics-sync-display--render-lyrics doc pos-ms)
 
-        ;; ── Waveform ──────────────────────────────────────────────────────
-        (emms-lyrics-sync-display--render-waveform-cached pos-ms)
-
 	;; ── CJK font text properties (header + lyrics) ────────────────────
         (emms-lyrics-sync-display--apply-cjk-font (point-min) (point-max))
 
@@ -214,9 +93,95 @@ Cache guard: uses (consp cached) not (listp cached).
           (delete-region lm-pos (point-max))
           (goto-char lm-pos)
           (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-          (emms-lyrics-sync-display--render-waveform-cached pos-ms)
 	  ;; ── CJK font text properties for the reinserted lyrics ─────────
           (emms-lyrics-sync-display--apply-cjk-font lm-pos (point-max))))))))
+
+;;; ── Waveform buffer renderer ─────────────────────────────────────────────────
+
+(defun emms-lyrics-sync-display--redraw-waveform-window (pos-ms)
+  "Erase and repaint the waveform buffer with a fresh composite at POS-MS.
+
+Unlike the previous in-buffer marker-and-partial-redraw approach,
+this function operates on a dedicated buffer that contains nothing
+but the waveform image.  No coordination with cover, header, or
+lyric content is required: the buffer is erased and repainted in
+one pass.
+
+Reuses the existing `emms-lyrics-sync-waveform--composite-at-point'
+and `--ensure-pngs' machinery.  On first track play, when the PNGs
+do not yet exist, `--ensure-pngs' starts async generation and the
+callback re-invokes this function when they are ready.
+
+Updates the cached mode line string (see
+`emms-lyrics-sync-waveform--cached-mode-line') so the mode line
+persists correctly after playback stops."
+  (when (and (buffer-live-p emms-lyrics-sync-waveform-buffer)
+             (fboundp 'emms-lyrics-sync-waveform--composite-at-point))
+    (with-current-buffer emms-lyrics-sync-waveform-buffer
+      (let* ((inhibit-read-only t)
+             (track     emms-lyrics-sync-core--current-track)
+             (dur       (and track (emms-lyrics-sync-track-duration track)))
+             (fp        (and track (emms-lyrics-sync-track-file-path track)))
+             (win       (get-buffer-window (current-buffer) t))
+             (char-w    (frame-char-width))
+             (char-h    (frame-char-height))
+	     ;; win-chars now subtracts the padding on both sides:
+	     (win-chars (if win
+			    (max 4 (- (window-body-width win)
+				      (* 2 emms-lyrics-sync-waveform-side-padding)))
+			  60))
+	     ;; px-w stays as win-chars × char-w (same as before)
+             (px-w      (let ((w (* win-chars char-w)))
+                          (if (oddp w) (1+ w) w)))
+	     (px-h      (let* ((raw (* emms-lyrics-sync-waveform-height char-h))
+			       (rem (mod raw 4)))
+			  (if (zerop rem) raw (+ raw (- 4 rem)))))
+             (pos-s     (/ (float pos-ms) 1000.0)))
+        (setq-local emms-lyrics-sync-waveform--cached-mode-line
+                    (emms-lyrics-sync-display--format-waveform-mode-line
+                     pos-ms track))
+        (erase-buffer)
+	;; NEW: left padding; right padding is implicit because win-chars
+	;; was reduced by 2× padding, so the image doesn't reach the body edge.
+	(when (and win (> emms-lyrics-sync-waveform-side-padding 0))
+	  (insert (make-string emms-lyrics-sync-waveform-side-padding ?\s)))
+        (cond
+         ;; ── PNG mode ─────────────────────────────────────────────────────
+         ((and fp (emms-lyrics-sync-waveform--use-png-p))
+          (let ((cached (gethash fp emms-lyrics-sync-waveform--png-cache)))
+            (cond
+             ((and (consp cached)
+                   (= (plist-get cached :px-w) px-w)
+                   (= (plist-get cached :px-h) px-h)
+                   (file-exists-p (plist-get cached :played))
+                   (file-exists-p (plist-get cached :remaining)))
+              (let ((cursor-x (if (and dur (> dur 0))
+                                  (max 1 (min (1- px-w)
+                                              (round (* (/ pos-s (float dur))
+                                                        px-w))))
+                                0)))
+                (emms-lyrics-sync-waveform--composite-at-point
+                 (plist-get cached :played)
+                 (plist-get cached :remaining)
+                 cursor-x px-h pos-s dur)))
+             (t
+              (insert (emms-lyrics-sync-waveform--render-unicode-flat
+                       win-chars pos-s dur))
+              (unless (eq cached 'pending)
+                (emms-lyrics-sync-waveform--ensure-pngs
+                 fp px-w px-h
+                 (lambda (plist)
+                   (when (and plist
+                              (buffer-live-p emms-lyrics-sync-waveform-buffer))
+                     (with-current-buffer emms-lyrics-sync-waveform-buffer
+                       (emms-lyrics-sync-display--redraw-waveform-window
+                        (or (emms-lyrics-sync-core--playback-position-ms)
+                            0)))))))))))
+         ;; ── Unicode fallback (terminal or no ffmpeg) ─────────────────────
+         (t
+          (insert (emms-lyrics-sync-waveform--render-unicode-flat
+                   win-chars pos-s dur))))
+        (force-mode-line-update)))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here

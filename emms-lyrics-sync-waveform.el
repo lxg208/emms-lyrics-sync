@@ -19,7 +19,6 @@
 
 ;;; ── Forward declarations ─────────────────────────────────────────────────────
 
-(defvar emms-lyrics-sync-display--waveform-marker nil)
 (defvar emms-lyrics-sync-display--buffer nil)
 (declare-function emms-lyrics-sync-display--window    "emms-lyrics-sync-display-vars")
 (declare-function emms-lyrics-sync-display--body-width "emms-lyrics-sync-display-vars")
@@ -155,45 +154,45 @@ old cached PNGs without a manual cache flush."
 ;;; ── Filter Complex Builder ───────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-waveform--filter-complex (px-w px-h bg-color wave-color)
-  "Build an ffmpeg filter_complex for foobar-style dual-channel waveform.
+  "Build an ffmpeg filter_complex for a dual-channel waveform.
 
-Foobar2000 foo_wave_minibar_mod style: L channel grows UPWARD from a
-shared centre line, R channel grows DOWNWARD from the same centre line.
+Uses linear scale (default) to accurately represent heavily compressed
+(brickwalled) audio without exaggerating noise.
 
-Algorithm:
-  1. Upmix to stereo (handles mono files transparently).
-  2. Channelsplit → separate L and R audio streams.
-  3. Render each channel at FULL px-h (showwavespic centres the waveform
-     in the full canvas, so peaks extend both above and below centre).
-  4. Composite each over a background plate.
-  5. Crop TOP half of L    → only upward peaks remain.
-  6. Crop BOTTOM half of R → only downward peaks remain.
-  7. vstack the two halves → one shared centre line, zero gap by
-     construction regardless of signal amplitude."
-  (let* ((half-h (/ px-h 2)))
+Draws a center line on the background, then overlays the stacked
+top and bottom halves of the waveform."
+  (let* ((half-h (/ px-h 2))
+         (cl-h   (max 1 emms-lyrics-sync-waveform-center-line))
+         ;; Center line y-position: center of the top half. If center
+         ;; line is 1px, it sits exactly on the boundary. If 2px, it
+         ;; straddles the boundary.
+         (cl-y   (- half-h (ceiling cl-h 2))))
     (format (concat
              "[0:a]aformat=channel_layouts=stereo[ac];"
              "[ac]channelsplit=channel_layout=stereo[L][R];"
-             "color=c=%s:s=%dx%d[bgL];"
-             "color=c=%s:s=%dx%d[bgR];"
+             "color=c=%s:s=%dx%d[bg];"
+             ;; Draw center line on the background
+             "[bg]drawbox=x=0:y=%d:w=%d:h=%d:c=%s:t=fill[bg_line];"
+             ;; Generate full-height waveforms (linear scale)
              "[L]showwavespic=s=%dx%d:split_channels=0:colors=%s[wfL_raw];"
              "[R]showwavespic=s=%dx%d:split_channels=0:colors=%s[wfR_raw];"
-             "[bgL][wfL_raw]overlay[wfL];"
-             "[bgR][wfR_raw]overlay[wfR];"
-             "[wfL]crop=%d:%d:0:0[topL];"
-             "[wfR]crop=%d:%d:0:%d[botR];"
-             "[topL][botR]vstack")
-            ;; bgL
+             ;; Crop L to top half, R to bottom half
+             "[wfL_raw]crop=%d:%d:0:0[topL];"
+             "[wfR_raw]crop=%d:%d:0:%d[botR];"
+             ;; Stack them and overlay onto the background
+             "[topL][botR]vstack[wf_combined];"
+             "[bg_line][wf_combined]overlay")
+            ;; bg
             bg-color px-w px-h
-            ;; bgR
-            bg-color px-w px-h
+            ;; bg_line: y, w, h, color
+            cl-y px-w cl-h wave-color
             ;; wfL_raw
             px-w px-h wave-color
             ;; wfR_raw
             px-w px-h wave-color
-            ;; crop topL: w h x y
+            ;; crop topL
             px-w half-h
-            ;; crop botR: w h x y(=half-h)
+            ;; crop botR
             px-w half-h half-h)))
 
 ;;; ── PNG Generation ───────────────────────────────────────────────────────────
@@ -374,61 +373,6 @@ needlessly regenerated)."
 			   'emms-lyrics-sync-waveform-remaining-face))))
                (put-text-property col (1+ col) 'face face line)))
     line))
-
-;;; ── Insert At Point (called by redraw.el) ────────────────────────────────────
-
-(defun emms-lyrics-sync-waveform--insert-at-point (file-path pos-s duration
-                                                     px-w px-h)
-  "Insert waveform for FILE-PATH at point.
-Sets `emms-lyrics-sync-display--waveform-marker' (NIL type) after
-inserting the separator newline and before inserting bar content.
-
-If PNGs are already cached: inserts composite immediately.
-If not cached: inserts unicode flat bar placeholder, starts async
-PNG generation, then triggers a same-track redraw on completion."
-  (let* ((cached  (gethash file-path emms-lyrics-sync-waveform--png-cache))
-         (win-chars (max 4 (emms-lyrics-sync-display--body-width)))
-         (buf     (current-buffer)))
-    ;; Separator newline BEFORE marker
-    (insert "\n")
-    (setq emms-lyrics-sync-display--waveform-marker
-          (copy-marker (point) nil))
-    (cond
-     ;; ── PNG ready ────────────────────────────────────────────────────────
-     ((and (consp cached)
-           (= (plist-get cached :px-w) px-w)
-           (= (plist-get cached :px-h) px-h)
-           (file-exists-p (plist-get cached :played))
-           (file-exists-p (plist-get cached :remaining)))
-      (let ((cursor-x (if (and duration (> duration 0))
-                          (max 1 (min (1- px-w)
-                                      (round (* (/ pos-s (float duration))
-                                                px-w))))
-                        0)))
-        (emms-lyrics-sync-waveform--composite-at-point
-         (plist-get cached :played)
-         (plist-get cached :remaining)
-         cursor-x px-h pos-s duration))
-      (insert "\n"))
-
-     ;; ── PNG pending or wrong dimensions — show flat bar, start/wait ───
-     (t
-      (insert (emms-lyrics-sync-waveform--render-unicode-flat
-               win-chars pos-s duration))
-      (insert "\n")
-      ;; Start generation only if not already pending
-      (unless (eq cached 'pending)
-        (emms-lyrics-sync-waveform--ensure-pngs
-         file-path px-w px-h
-         (lambda (plist)
-           (when (and plist (buffer-live-p buf))
-             (with-current-buffer buf
-               (when (and emms-lyrics-sync-core--current-track
-                          (equal (emms-lyrics-sync-track-file-path
-                                  emms-lyrics-sync-core--current-track)
-                                 file-path)
-                          (fboundp 'emms-lyrics-sync-display-on-track-change))
-                 (emms-lyrics-sync-display-on-track-change)))))))))))
 
 ;;; ── Public: Invalidate Cache ────────────────────────────────────────────────
 

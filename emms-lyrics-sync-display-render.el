@@ -79,16 +79,11 @@ Returns the stable path on success, nil on failure."
   (let* ((char-h    (frame-char-height))
          (win       (emms-lyrics-sync-display--window))
          (win-h     (if win (window-body-height win) 40))
-         ;; Fixed budget = everything except the cover image itself.
-         ;;   header 5  + blank-after-header 1  + lyrics 12
-         ;;   + waveform-separator 1 + waveform 3 + waveform-trailing 1
-         (fixed     (+ 5
-                       1
-                       emms-lyrics-sync-display-lyrics-height
-                       1
-                       emms-lyrics-sync-waveform-height
-                       1))
-         ;; Cover itself + 2 newlines after it
+         ;; Fixed budget for the lyrics buffer only.  Waveform is now
+         ;; in its own window, so its lines are not part of this
+         ;; budget: header 5 + blank-after-header 1 + lyrics lines.
+         (fixed     (+ 5 1 emms-lyrics-sync-display-lyrics-height))
+         ;; Cover itself plus the two newlines that follow it
          (cover-extra 2)
          (avail     (max 3 (- win-h fixed cover-extra)))
          (target-lines (min emms-lyrics-sync-display-cover-lines avail))

@@ -40,17 +40,13 @@
 
 (defvar emms-lyrics-sync-display-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Standard hide-window on q, regardless of what emms-playlist-mode-map
-    ;; binds q to (it may hide the playlist, which we don't want in a side
-    ;; window showing lyrics).
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'emms-lyrics-sync-display-hide)
     map)
   "Keymap for `emms-lyrics-sync-display-mode'.
 
 Its parent is set to `emms-playlist-mode-map' so all EMMS player
-controls (pause, next, previous, mute, volume, seek, speed, etc.)
-work in this buffer as they do in the playlist buffer.  The global
-C-c L bindings from `emms-lyrics-sync-mode-map' also apply here.")
+controls work in this buffer.  `q' hides the entire sidebar group
+atomically (both lyrics and waveform windows), not just this window.")
 
 (defun emms-lyrics-sync-display--apply-font ()
   "Apply `display-fontset' or `display-font-family' to current buffer.
@@ -112,20 +108,16 @@ baseline."
                 (face-attribute 'default :height)))))
 
 (define-derived-mode emms-lyrics-sync-display-mode special-mode "EMMS-Lyrics"
-  "Major mode for the *emms-lyrics* display buffer.
-
-Player controls inherit from `emms-playlist-mode-map'.  Global
-C-c L bindings from `emms-lyrics-sync-mode-map' apply on top."
+  "Major mode for the *emms-lyrics* display buffer."
   :group 'emms-lyrics-sync
-  (setq-local cursor-type        nil
-              truncate-lines     t
-              line-spacing       0.15
-              left-margin-width  1
-              right-margin-width 1)
-  ;; Lyrics are read-only; hl-line highlight is visual noise on them,
-  ;; especially since each line's last char can look highlighted even
-  ;; when it is a plain space.
-  (hl-line-mode -1)  
+  (setq-local cursor-type          nil
+              truncate-lines       t
+              line-spacing         0.15        ; ← was (if display-line-height 0 0.15)
+              left-margin-width    0
+              right-margin-width   0
+	      left-fringe-width    0
+              right-fringe-width   0
+	      mode-line-format     nil)
   (emms-lyrics-sync-display--apply-font))
 
 (with-eval-after-load 'emms-playlist-mode
@@ -144,7 +136,7 @@ Call after changing `emms-lyrics-sync-display-fontset' or
 
 ;;; ── Buffer & Window Management ───────────────────────────────────────────────
 
-(defun emms-lyrics-sync-display--get-buffer ()
+(defun emms-lyrics-sync-display--get-buffer ()          ; ← KEEP unchanged
   "Return the lyrics buffer, creating and configuring it if needed."
   (unless (buffer-live-p emms-lyrics-sync-display--buffer)
     (setq emms-lyrics-sync-display--buffer
@@ -153,30 +145,135 @@ Call after changing `emms-lyrics-sync-display-fontset' or
       (emms-lyrics-sync-display-mode)))
   emms-lyrics-sync-display--buffer)
 
-;;;###autoload
-(defun emms-lyrics-sync-display-show ()
-  "Show the emms-lyrics-sync buffer in a side window."
-  (interactive)
-  (display-buffer
+;;; ── Waveform buffer ──────────────────────────────────────────────────────────
+
+(defvar emms-lyrics-sync-waveform-mode-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "q") #'emms-lyrics-sync-display-hide)
+    m)
+  "Keymap for `emms-lyrics-sync-waveform-mode'.
+
+Player controls inherit from `emms-playlist-mode-map' (set via
+`set-keymap-parent' after `emms-playlist-mode' loads), so pause,
+next, previous, mute, volume, seek, and speed work identically to
+the playlist and lyrics buffers.  F3 L bindings come from the
+global `emms-lyrics-sync-mode-map' and are active here automatically
+because the minor mode is global.")
+
+(with-eval-after-load 'emms-playlist-mode
+  (set-keymap-parent emms-lyrics-sync-waveform-mode-map
+                     emms-playlist-mode-map))
+
+(define-derived-mode emms-lyrics-sync-waveform-mode special-mode "EMMS-Waveform"
+  "Major mode for the dedicated waveform buffer.
+
+The buffer contains a single waveform image (or a Unicode flat bar
+fallback).  Player controls inherit from `emms-playlist-mode-map'.
+The mode line shows elapsed/duration plus compact artist/title."
+  :group 'emms-lyrics-sync
+  (setq-local cursor-type         nil
+              truncate-lines      t
+              left-margin-width   0
+              right-margin-width  0
+	      left-fringe-width   0
+              right-fringe-width  0
+              mode-line-format
+              '((:eval emms-lyrics-sync-waveform--cached-mode-line))))
+
+(defun emms-lyrics-sync-display--get-waveform-buffer ()   ; ← ADD
+  "Return the waveform buffer, creating and configuring it if needed."
+  (unless (buffer-live-p emms-lyrics-sync-waveform-buffer)
+    (setq emms-lyrics-sync-waveform-buffer
+          (get-buffer-create emms-lyrics-sync-waveform-buffer-name))
+    (with-current-buffer emms-lyrics-sync-waveform-buffer
+      (emms-lyrics-sync-waveform-mode)))
+  emms-lyrics-sync-waveform-buffer)
+
+(defun emms-lyrics-sync-display--format-waveform-mode-line (pos-ms track)
+  "Format the waveform mode line for POS-MS and TRACK.
+
+Centered within the window width.  Each segment uses the
+corresponding metadata face; separators render in past-line-face.
+Layout adapts to width:
+  >= 50 cols:  elapsed/total │ artist — title
+  >= 25 cols:  elapsed/total │ artist
+  <  25 cols:  elapsed/total"
+  (let* ((win       (get-buffer-window emms-lyrics-sync-waveform-buffer t))
+	 (width     (if win (window-total-width win) 65))    ; ← was window-body-width
+         (dur       (and track (emms-lyrics-sync-track-duration track)))
+         (elapsed-s (propertize
+                     (emms-lyrics-sync-display--format-time
+                      (/ (or pos-ms 0) 1000.0))
+                     'face 'emms-lyrics-sync-elapsed-face))
+         (dur-s     (propertize
+                     (emms-lyrics-sync-display--format-time dur)
+                     'face 'emms-lyrics-sync-duration-face))
+         (slash     (propertize "/" 'face 'emms-lyrics-sync-past-line-face))
+         (pipe      (propertize " │ " 'face 'emms-lyrics-sync-past-line-face))
+         (dash      (propertize " — " 'face 'emms-lyrics-sync-past-line-face))
+         (time      (concat elapsed-s slash dur-s))
+         (artist    (and track (propertize
+                                (emms-lyrics-sync-track-artist track)
+                                'face 'emms-lyrics-sync-artist-face)))
+         (title     (and track (propertize
+                                (emms-lyrics-sync-track-title track)
+                                'face 'emms-lyrics-sync-title-face)))
+         (content   (cond
+                     ((and artist title (>= width 50))
+                      (concat time pipe artist dash title))
+                     ((and artist (>= width 25))
+                      (concat time pipe artist))
+                     (t time)))
+         (content-w (string-width content))
+         (pad       (max 0 (/ (- width content-w) 2))))
+    (concat (make-string pad ?\s) content)))
+
+;;; ── Window management ────────────────────────────────────────────────────────
+
+(defun emms-lyrics-sync-display--group-visible-p ()       ; ← ADD
+  "Return non-nil if the lyrics sidebar is currently displayed."
+  (and (buffer-live-p emms-lyrics-sync-display--buffer)
+       (get-buffer-window emms-lyrics-sync-display--buffer t)))
+
+(defun emms-lyrics-sync-display--create-windows ()        ; ← ADD
+  "Create the lyrics and (if enabled) waveform side windows, atomized."
+  (display-buffer-in-side-window
    (emms-lyrics-sync-display--get-buffer)
-   `(display-buffer-in-side-window
-     (side          . ,emms-lyrics-sync-display-side)
+   `((side          . ,emms-lyrics-sync-display-side)
+     (slot          . 0)
      (window-width  . ,emms-lyrics-sync-display-width)
-     (preserve-size . (t . nil))
-     (slot          . 0))))
+     (preserve-size . (t . nil))))
+  (when (and (boundp 'emms-lyrics-sync-waveform-height)
+             (> emms-lyrics-sync-waveform-height 0))
+    (display-buffer-in-side-window
+     (emms-lyrics-sync-display--get-waveform-buffer)
+     `((side          . ,emms-lyrics-sync-display-side)
+       (slot          . 1)
+       (window-height . ,(1+ emms-lyrics-sync-waveform-height))
+       (preserve-size . (nil . t))))
+    (when-let* ((win (get-buffer-window emms-lyrics-sync-display--buffer t))
+                (parent (window-parent win)))
+      (window-make-atom parent))))
 
 ;;;###autoload
-(defun emms-lyrics-sync-display-hide ()
-  "Hide the emms-lyrics-sync side window."
+(defun emms-lyrics-sync-display-show ()                   ; ← REPLACE
+  "Show the lyrics sidebar.  Creates windows if not already visible."
   (interactive)
-  (when-let* ((win (emms-lyrics-sync-display--window)))
-    (delete-window win)))
+  (unless (emms-lyrics-sync-display--group-visible-p)
+    (emms-lyrics-sync-display--create-windows)))
 
 ;;;###autoload
-(defun emms-lyrics-sync-display-toggle ()
-  "Toggle the emms-lyrics-sync side window."
+(defun emms-lyrics-sync-display-hide ()                   ; ← REPLACE
+  "Hide the entire lyrics sidebar atomically."
   (interactive)
-  (if (emms-lyrics-sync-display--window)
+  (when-let* ((win (get-buffer-window emms-lyrics-sync-display--buffer t)))
+    (delete-window (window-atom-root win))))
+
+;;;###autoload
+(defun emms-lyrics-sync-display-toggle ()                 ; ← REPLACE
+  "Show the lyrics sidebar if hidden, hide it if visible."
+  (interactive)
+  (if (emms-lyrics-sync-display--group-visible-p)
       (emms-lyrics-sync-display-hide)
     (emms-lyrics-sync-display-show)))
 
@@ -196,35 +293,31 @@ Call after changing `emms-lyrics-sync-display-fontset' or
   (setq emms-lyrics-sync-display--timer nil))
 
 (defun emms-lyrics-sync-display--tick ()
-  "Periodic 100 ms callback: update elapsed, lyrics context, and waveform."
-  (when (and (buffer-live-p emms-lyrics-sync-display--buffer)
-             (emms-lyrics-sync-display--window))
+  "Periodic 100 ms callback: update elapsed, lyrics, and waveform."
+  (when (or (emms-lyrics-sync-display--window)
+            (get-buffer-window emms-lyrics-sync-waveform-buffer t))
     (condition-case err
-        (let* ((result  emms-lyrics-sync-core--current-result)
-               (doc     (when result (emms-lyrics-sync-result-doc result)))
-               (pos-ms  (or (emms-lyrics-sync-core--playback-position-ms) 0))
-               (new-idx (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1))
-               (lyrics-redrawn nil))
+        (let* ((result   emms-lyrics-sync-core--current-result)
+               (doc      (when result (emms-lyrics-sync-result-doc result)))
+               (pos-ms   (or (emms-lyrics-sync-core--playback-position-ms) 0))
+               (new-idx  (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1)))
 
-          ;; 1. Elapsed time — every tick
-          (emms-lyrics-sync-display--update-elapsed (/ pos-ms 1000.0))
+          ;; 1. Elapsed time in lyrics buffer
+          (when (emms-lyrics-sync-display--window)
+            (emms-lyrics-sync-display--update-elapsed (/ pos-ms 1000.0)))
 
-          ;; 2. Lyrics context — only when line index changes
+          ;; 2. Lyric line advance
           (unless (= new-idx emms-lyrics-sync-display--last-line-idx)
-            (setq emms-lyrics-sync-display--last-line-idx new-idx
-                  lyrics-redrawn t)
+            (setq emms-lyrics-sync-display--last-line-idx new-idx)
             (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms))
 
-          ;; 3. A2 word overlays — every tick for smooth animation
+          ;; 3. A2 word overlays
           (emms-lyrics-sync-display--update-word-overlays pos-ms)
 
-          ;; 4. Waveform cursor — throttled to ~1/s (every 10 ticks).
-          ;;    Skipped when lyrics were just redrawn (redraw-lyrics-only
-          ;;    already called render-waveform-cached which updated the bar).
+          ;; 4. Waveform once per second
           (cl-incf emms-lyrics-sync-display--tick-counter)
-          (when (and (zerop (mod emms-lyrics-sync-display--tick-counter 10))
-                     (not lyrics-redrawn))
-            (emms-lyrics-sync-display--update-waveform-cursor pos-ms)))
+          (when (zerop (mod emms-lyrics-sync-display--tick-counter 10))
+            (emms-lyrics-sync-display--redraw-waveform-window pos-ms)))
 
       (error
        (message "emms-lyrics-sync-display tick error: %S" err)))))
@@ -263,6 +356,11 @@ Guards:
       (setq emms-lyrics-sync-display--last-line-idx -1
             emms-lyrics-sync-display--tick-counter  0)
       (emms-lyrics-sync-display--full-redraw)
+      ;; Within the `else` (new track) branch of on-track-change, after full-redraw:
+      (when (and track
+		 (boundp 'emms-lyrics-sync-waveform-height)
+		 (> emms-lyrics-sync-waveform-height 0))
+	(emms-lyrics-sync-display--redraw-waveform-window pos-ms))
       ;; Kick off async ffprobe tech-info augmentation.
       ;; When it completes it re-renders only the header tech line.
       (when (and track (fboundp 'emms-lyrics-sync-display--ffprobe-augment))
@@ -284,11 +382,18 @@ Guards:
       (emms-lyrics-sync-display-show))))
 
 (defun emms-lyrics-sync-display-on-stop ()
-  "Called by core.el when playback stops or is paused."
-  ;; Reset so the next play — even of the same track — triggers a full redraw
-  ;; and resets the waveform placeholder.
+  "Called when playback stops (not on pause).
+
+Resets the waveform to full-grey at 0:00, because after a stop the
+user cannot return to the previous position (unless Phase 4's seek
+feature is implemented).  Pause is handled separately and leaves the
+display frozen at its current position."
+  (when (and (boundp 'emms-lyrics-sync-waveform-height)
+             (> emms-lyrics-sync-waveform-height 0))
+    (emms-lyrics-sync-display--redraw-waveform-window 0))
   (setq emms-lyrics-sync-display--current-file-path nil)
   (emms-lyrics-sync-display--stop-timer))
+
 
 (provide 'emms-lyrics-sync-display)
 ;;; emms-lyrics-sync-display.el ends here
