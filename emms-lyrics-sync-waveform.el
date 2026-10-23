@@ -53,18 +53,36 @@ Changing this value invalidates all cached PNGs automatically."
                   (color :tag "Explicit hex color"))
   :group 'emms-lyrics-sync)
 
-(defcustom emms-lyrics-sync-waveform-color-played "#4a9eff"
-  "Waveform fill colour for the already-played portion."
+;;; ── Waveform colours ─────────────────────────────────────────────────────────
+;;
+;; played   #5c6bc0  Indigo 400  — darker/more saturated than remaining;
+;;                    contrasts on both hue (purple-blue) and luminance axes
+;; remaining #90a4ae  Blue Grey 300 — lighter/greyer; clearly "unplayed/inactive"
+;; cursor   #ffcb6b  Amber 200   — same as current-line-face; "now" marker
+
+
+(defcustom emms-lyrics-sync-waveform-color-played "#5c6bc0"
+  "Waveform fill colour for the already-played portion.
+Material Indigo 400 — saturated and dark enough to contrast clearly
+with the remaining portion (Blue Grey 300 #90a4ae) on both hue
+(purple-blue vs grey-blue) and luminance axes."
   :type  'color
   :group 'emms-lyrics-sync)
 
-(defcustom emms-lyrics-sync-waveform-color-remaining "#888888"
-  "Waveform fill colour for the not-yet-played portion."
+
+(defcustom emms-lyrics-sync-waveform-color-remaining "#90a4ae"
+  "Waveform fill colour for the not-yet-played portion.
+Material Blue Grey 300 — bright enough to be clearly visible against
+the dark buffer background, yet cooler and distinct from both the
+played indigo (#9fa8da) and the past-lyrics grey (#b0bec5)."
   :type  'color
   :group 'emms-lyrics-sync)
 
-(defcustom emms-lyrics-sync-waveform-color-cursor "#ffffff"
-  "Colour for the 2-pixel playback cursor line."
+
+(defcustom emms-lyrics-sync-waveform-color-cursor "#ffcb6b"
+  "Colour for the 2-pixel playback cursor line.
+Amber 200 — the same colour as `emms-lyrics-sync-current-line-face',
+anchoring the cursor visually as the \"now\" marker."
   :type  'color
   :group 'emms-lyrics-sync)
 

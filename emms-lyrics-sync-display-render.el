@@ -112,29 +112,46 @@ window to fit the frame."
             (puthash key 'none emms-lyrics-sync-display--cover-cache)
             nil)))))))
 
+(defvar emms-lyrics-sync-display--placeholder-colors
+  '("#1E88E5" ; Blue 600
+    "#00897B" ; Teal 600
+    "#8E24AA" ; Purple 600
+    "#F4511E" ; Deep Orange 600
+    "#3949AB" ; Indigo 600
+    "#00ACC1" ; Cyan 600
+    "#D81B60" ; Pink 600
+    "#43A047" ; Green 600
+    "#546E7A" ; Blue Grey 600
+    "#5E35B1") ; Deep Purple 600
+  "Material Design 600-level colors used for placeholder covers.")
+
 (defun emms-lyrics-sync-display--placeholder-image (track height)
   "Generate deterministic placeholder SVG for TRACK at HEIGHT pixels.
 
-Background color and initial derive from the file path hash, so the
-same track always produces the same image.  Returns nil if SVG is
-unsupported or HEIGHT is zero."
+Background color is deterministically chosen from a curated list of
+Material Design colors based on a hash of the file path, ensuring the
+same track always produces the same image.  The initial is rendered in
+white.  Returns nil if SVG is unsupported or HEIGHT is zero."
   (when (and (display-graphic-p) (> height 0))
     (let* ((key    (or (and track (emms-lyrics-sync-track-file-path track)) ""))
            (hash   (md5 key))
-           (r      (+ 40 (/ (string-to-number (substring hash 0 2) 16) 3)))
-           (g      (+ 60 (/ (string-to-number (substring hash 2 4) 16) 3)))
-           (b      (+ 80 (/ (string-to-number (substring hash 4 6) 16) 3)))
-           (color  (format "#%02x%02x%02x" r g b))
+           ;; Use the first 4 hex chars to get a 16-bit int, then modulo
+           ;; by the number of colors to pick an index deterministically.
+           (hash-int (string-to-number (substring hash 0 4) 16))
+           (color  (nth (mod hash-int
+                             (length emms-lyrics-sync-display--placeholder-colors))
+                        emms-lyrics-sync-display--placeholder-colors))
            (artist (and track (emms-lyrics-sync-track-artist track)))
            (initial (if (and artist (> (length artist) 0))
                         (let ((c (substring artist 0 1)))
+                          ;; Escape XML-unsafe characters
                           (if (string-match-p "[<>&\"']" c) "♪" c))
                       "♪"))
            (font-sz (round (* height 0.45)))
            (svg (format (concat "<svg xmlns='http://www.w3.org/2000/svg'"
                                 " width='%d' height='%d'>"
                                 "<rect width='100%%' height='100%%' fill='%s'/>"
-                                "<text x='50%%' y='52%%' fill='white' font-size='%d'"
+                                "<text x='50%%' y='52%%' fill='#FFFFFF' font-size='%d'"
                                 " font-family='sans-serif' text-anchor='middle'"
                                 " dominant-baseline='central'>%s</text></svg>")
                         height height color font-sz initial)))

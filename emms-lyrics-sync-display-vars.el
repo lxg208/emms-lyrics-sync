@@ -188,79 +188,133 @@ waveform resolution."
 ;; lines centered via string-width.  Both scale character pixel width in
 ;; GUI Emacs, causing text to render wider than string-width reports.
 ;; Use colour alone for visual emphasis.
+;;
+;; Colour system (dark / light):
+;;
+;;   Artist   #4fc3f7 / #0277bd   Light Blue 300 / Blue 800
+;;   Album    #ce93d8 / #7b1fa2   Purple 200 / Purple 800
+;;   Title    #a5d6a7 / #388e3c   Green 200 / Green 800
+;;   Tech     #4db6ac / #00796b   Teal 300 / Teal 700        (unchanged)
+;;   Elapsed  #7986cb / #3949ab   Indigo 300 / Indigo 600 — matches waveform-played
+;;   Duration #80cbc4 / #00897b   Teal 200 / Teal 600        (unchanged)
+;;
+;;   Past lyrics / separators (/, |, —):
+;;            inherit font-lock-comment-face  →  #b0bec5 Material Blue Grey 200
+;;
+;;   Current  #ffcb6b / #b36a00   Amber 200                  (unchanged)
+;;   Future   #fffacd / #212121   Lemon chiffon (user's normal-text colour)
+;;
+;;   A2 sung word    #c9914f / #9a5a1a   Dim amber — subordinate, 'just past'
+;;   A2 current word #fb8c00 / #e65100   Orange 600 + underline — hot focus
+;;
+;; Semantic gradient (dark):
+;;   Past #b0bec5  <  Sung #c9914f  <  Current-line #ffcb6b  <  A2-word #fb8c00
+;;   (grey)           (dim ★)           (amber)                  (orange hot)
+;;
+;; Elapsed #7986cb = waveform-played colour → coherence across header + waveform
+;; Waveform remaining #546e7a   Blue Grey 600 — darker than past-lyrics, distinct in waveform
+;; Waveform cursor    #ffcb6b   Amber — same as current-line-face, "now" marker
+
 
 (defface emms-lyrics-sync-artist-face
-  '((t :inherit font-lock-function-name-face))
+  '((((background dark))  :foreground "#4fc3f7")   ; Light Blue 300
+    (((background light)) :foreground "#0277bd"))   ; Blue 800
   "Face for the Artist[ - Composer] header line (line 1)."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-album-face
-  '((t :inherit font-lock-keyword-face))
+  '((((background dark))  :foreground "#ce93d8")   ; Purple 200
+    (((background light)) :foreground "#7b1fa2"))   ; Purple 800
   "Face for the Album header line (line 2, shown only when album is available)."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-title-face
-  '((t :inherit font-lock-string-face))
+  '((((background dark))  :foreground "#a5d6a7")   ; Green 200
+    (((background light)) :foreground "#388e3c"))   ; Green 800
   "Face for the [Track. ]Title header line (line 3)."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-tech-face
-  '((((background dark))  :foreground "#4db6ac")
-    (((background light)) :foreground "#00796b"))
+  '((((background dark))  :foreground "#4db6ac")   ; Teal 300
+    (((background light)) :foreground "#00796b"))   ; Teal 700
   "Face for the CODEC | bits/kHz | kbps | channels info line (line 4).
 Material Teal 300 — clearly distinct from past-line-face (comment grey),
 reads as cool/technical metadata without competing with the amber current line."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-elapsed-face
-  '((t :inherit font-lock-constant-face))
-  "Face for the elapsed-time portion of the time line (e.g. \"0:18\")."
+  '((((background dark))  :foreground "#5c6bc0")   ; Indigo 400 — matches waveform-played
+    (((background light)) :foreground "#3949ab"))   ; Indigo 600
+  "Face for the elapsed-time portion of the time line (e.g. \"0:18\").
+Intentionally the same colour as `emms-lyrics-sync-waveform-color-played'
+so elapsed time and the played waveform read as one coherent system.
+Indigo 300 is clearly distinct from artist-face (Light Blue 300) despite
+sharing the 300 Material weight — they sit in different hue families
+(blue-purple vs cyan-blue)."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-duration-face
-  '((((background dark))  :foreground "#80cbc4")
-    (((background light)) :foreground "#00897b"))
+  '((((background dark))  :foreground "#80cbc4")   ; Teal 200
+    (((background light)) :foreground "#00897b"))   ; Teal 600
   "Face for the duration portion of the time line (e.g. \"/ 4:55\").
-Material Teal 200 — lighter than tech-face, complements the teal elapsed
+Material Teal 200 — lighter than tech-face, complements the blue elapsed
 face while remaining clearly distinct from the grey past-line-face."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-past-line-face
   '((t :inherit font-lock-comment-face))
-  "Face for lyrics lines that have already played."
+  "Face for lyrics lines that have already played, and for all separators
+\(/, |, — used in the time line and mode line).
+Inherits `font-lock-comment-face', which the material theme sets to
+#b0bec5 (Material Blue Grey 200).  If you have overridden that face in
+your init.el and want to guarantee #b0bec5 independently, replace the
+spec with:
+  \\='((((background dark))  :foreground \"#b0bec5\")
+    (((background light)) :foreground \"#78909c\"))"
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-current-line-face
-  '((((background dark))  :foreground "#ffcb6b")
+  '((((background dark))  :foreground "#ffcb6b")   ; Amber 200
     (((background light)) :foreground "#b36a00"))
   "Face for the currently playing lyrics line.
 Warm amber — no bold weight so string-width centering stays accurate."
   :group 'emms-lyrics-sync)
 
-(defface emms-lyrics-sync-future-line-face
-  '((t))
-  "Face for upcoming lyrics lines.
 
-Empty spec: the face falls through to the buffer's effective
-`default' for all attributes.  This is intentionally *not*
-`(:inherit default)' — an explicit `:inherit default' resolves
-against the frame's default face, bypassing the buffer-local
-`face-remapping-alist' height override installed by `--apply-font'.
-An empty spec cascades implicitly through the remapped default, so
-future lines pick up `display-font-scale' at the same height as
-current and past lines."
+(defface emms-lyrics-sync-future-line-face
+  '((((background dark))  :foreground "#fffacd")   ; Lemon chiffon — user's normal-text colour
+    (((background light)) :foreground "#212121"))
+  "Face for upcoming lyrics lines.
+Uses an explicit foreground (#fffacd on dark) rather than an empty spec
+or `:inherit default', so the colour is predictable regardless of any
+buffer-local face-remapping installed by `--apply-font'.  The height
+remapping caveat in the old empty-spec comment only affects :height, not
+:foreground, so an explicit colour is safe here."
   :group 'emms-lyrics-sync)
+
 
 (defface emms-lyrics-sync-word-sung-face
-  '((((background dark))  :foreground "#c3e88d")
-    (((background light)) :foreground "#2d7a2d"))
-  "Face for already-sung words within the current A2 karaoke line."
+  '((((background dark))  :foreground "#c9914f")   ; Dim amber — 'just past'
+    (((background light)) :foreground "#9a5a1a"))
+  "Face for already-sung words within the current A2 karaoke line.
+Dim amber, clearly subordinate to both the current-line colour (#ffcb6b)
+and the A2 current-word colour (#fb8c00), giving a warm receding feel."
   :group 'emms-lyrics-sync)
 
+
 (defface emms-lyrics-sync-word-current-face
-  '((((background dark))  :foreground "#ffdd00" :underline t)
-    (((background light)) :foreground "#cc6600" :underline t))
-  "Face for the word currently being sung (A2 karaoke highlight)."
+  '((((background dark))  :foreground "#fb8c00" :underline t)   ; Orange 600
+    (((background light)) :foreground "#e65100" :underline t))  ; Deep Orange 900
+  "Face for the word currently being sung (A2 karaoke highlight).
+Orange 600 + underline: stands out from the ambient amber of
+`emms-lyrics-sync-current-line-face' and from the dim-amber sung words."
   :group 'emms-lyrics-sync)
 
 ;;; ── Internal State ───────────────────────────────────────────────────────────
