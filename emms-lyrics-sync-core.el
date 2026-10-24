@@ -195,6 +195,9 @@ Updated asynchronously by the process filter; read by the display timer.")
 (defvar emms-lyrics-sync-core--mpv-request-id 0
   "Monotonically increasing request ID for mpv IPC JSON commands.")
 
+(defvar emms-lyrics-sync-core--pending-seek nil
+  "If non-nil, a cons (FILE-PATH . SECONDS) to seek once mpv connects.")
+
 ;;; ── mpv IPC Implementation ───────────────────────────────────────────────────
 
 (defun emms-lyrics-sync-core--mpv-filter (_proc string)
@@ -231,18 +234,38 @@ Cleans up state on disconnect so the next tick reconnects automatically."
     (setq emms-lyrics-sync-core--mpv-process nil
           emms-lyrics-sync-core--mpv-buffer  "")))
 
+(defun emms-lyrics-sync-core--mpv-seek (seconds)
+  "Send a seek command to mpv to jump to SECONDS."
+  (when (process-live-p emms-lyrics-sync-core--mpv-process)
+    (condition-case nil
+        (process-send-string
+         emms-lyrics-sync-core--mpv-process
+         (format "{\"command\":[\"set_property\",\"time-pos\",%.3f]}\n" seconds))
+      (error nil))))
+
 (defun emms-lyrics-sync-core--mpv-connect ()
   "Attempt to connect to the mpv IPC socket.
 Returns t on success, nil if the socket is absent or connection fails.
 Safe to call repeatedly — returns immediately if already connected."
-  ;; Read fresh socket path at connect time — emms-player-simple-mpv
-  ;; regenerates it on every mpv start, so we must read it here not at
-  ;; config time.  Guarded by boundp so there is no hard dependency.
   (when (boundp 'emms-player-simple-mpv--socket)
     (setq emms-lyrics-sync-mpv-socket emms-player-simple-mpv--socket))
-  (when (and emms-lyrics-sync-mpv-ipc-enabled
-             (not (process-live-p emms-lyrics-sync-core--mpv-process))
-             (file-exists-p emms-lyrics-sync-mpv-socket))
+  
+  (cond
+   ;; 1. Already connected. Just flush any pending seek.
+   ((process-live-p emms-lyrics-sync-core--mpv-process)
+    (when emms-lyrics-sync-core--pending-seek
+      (let ((file (car emms-lyrics-sync-core--pending-seek))
+            (sec  (cdr emms-lyrics-sync-core--pending-seek)))
+        (when (and emms-lyrics-sync-core--current-track
+                   (equal file (emms-lyrics-sync-track-file-path
+                                emms-lyrics-sync-core--current-track)))
+          (emms-lyrics-sync-core--mpv-seek sec)))
+      (setq emms-lyrics-sync-core--pending-seek nil))
+    t)
+
+   ;; 2. Not connected, but socket exists. Try to connect.
+   ((and emms-lyrics-sync-mpv-ipc-enabled
+         (file-exists-p emms-lyrics-sync-mpv-socket))
     (condition-case err
         (progn
           (setq emms-lyrics-sync-core--mpv-process
@@ -257,10 +280,24 @@ Safe to call repeatedly — returns immediately if already connected."
           ;; Reset position cache on fresh connection
           (setq emms-lyrics-sync-core--mpv-position 0.0
                 emms-lyrics-sync-core--mpv-buffer   "")
+
+          ;; Apply pending seek if any (e.g., user clicked a lyric line while stopped)
+          (when emms-lyrics-sync-core--pending-seek
+            (let ((file (car emms-lyrics-sync-core--pending-seek))
+                  (sec  (cdr emms-lyrics-sync-core--pending-seek)))
+              (when (and emms-lyrics-sync-core--current-track
+                         (equal file (emms-lyrics-sync-track-file-path 
+                                      emms-lyrics-sync-core--current-track)))
+                (emms-lyrics-sync-core--mpv-seek sec)))
+            (setq emms-lyrics-sync-core--pending-seek nil))
           t)
       (error
-       (unless (string-match-p "Connection refused" (format "%S" err)) (message "emms-lyrics: mpv IPC connect failed: %S" err))
-       nil))))
+       (unless (string-match-p "Connection refused" (format "%S" err))
+         (message "emms-lyrics: mpv IPC connect failed: %S" err))
+       nil)))
+
+   ;; 3. Socket missing or IPC disabled.
+   (t nil)))
 
 (defun emms-lyrics-sync-core--mpv-request-position ()
   "Send an async time-pos request to mpv.

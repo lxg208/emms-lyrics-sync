@@ -46,14 +46,14 @@
 ;;; ── Partial Redraw: Lyrics + Waveform ────────────────────────────────────────
 
 (defun emms-lyrics-sync-display--redraw-lyrics-only (doc pos-ms)
-  "Replace lyrics and waveform without touching cover or header."
+  "Replace lyrics without touching cover or header."
   (when (and (markerp emms-lyrics-sync-display--lyrics-marker)
              (marker-buffer emms-lyrics-sync-display--lyrics-marker)
              (buffer-live-p emms-lyrics-sync-display--buffer))
     (with-current-buffer emms-lyrics-sync-display--buffer
-      (save-excursion
       (let* ((inhibit-read-only t)
-             (lm-pos (marker-position emms-lyrics-sync-display--lyrics-marker)))
+             (lm-pos (marker-position emms-lyrics-sync-display--lyrics-marker))
+             (cur-idx (if doc (emms-lyrics-sync-lrc-seek doc pos-ms) -1))) ; <-- Added this
         (when (and (integerp lm-pos) (<= lm-pos (point-max)))
           (emms-lyrics-sync-display--clear-sung-overlays)
           (emms-lyrics-sync-display--reset-word-overlay)
@@ -61,8 +61,9 @@
           (delete-region lm-pos (point-max))
           (goto-char lm-pos)
           (emms-lyrics-sync-display--render-lyrics doc pos-ms)
-	  ;; ── CJK font text properties for the reinserted lyrics ─────────
-          (emms-lyrics-sync-display--apply-cjk-font lm-pos (point-max))))))))
+          (emms-lyrics-sync-display--apply-cjk-font lm-pos (point-max))
+          (when (>= cur-idx 0)
+            (emms-lyrics-sync-display--auto-scroll cur-idx)))))))
 
 ;;; ── Waveform buffer renderer ─────────────────────────────────────────────────
 
@@ -117,6 +118,11 @@
               ;; Success: pad left, then insert image
               (when (and win (> emms-lyrics-sync-waveform-side-padding 0))
                 (insert (make-string emms-lyrics-sync-waveform-side-padding ?\s)))
+
+	      ;; Record the exact start of the image for click calculations
+	      (setq-local emms-lyrics-sync-waveform--img-start (copy-marker (point) nil))
+              (setq-local emms-lyrics-sync-waveform--last-px-w px-w)
+	      
               (let ((cursor-x (if (and dur (> dur 0))
                                   (max 1 (min (1- px-w)
                                               (round (* (/ pos-s (float dur))
@@ -125,7 +131,13 @@
                 (emms-lyrics-sync-waveform--composite-at-point
                  (plist-get cached :played)
                  (plist-get cached :remaining)
-                 cursor-x px-h pos-s dur)))
+                 cursor-x px-h pos-s dur)
+		;; Attach the click map to the image
+                (let ((map (make-sparse-keymap)))
+                  (define-key map [mouse-1] #'emms-lyrics-sync-display--waveform-click)
+                  (put-text-property (marker-position emms-lyrics-sync-waveform--img-start)
+                                     (point)
+                                     'keymap map))))
              (t
               ;; Pending: centered flat line
               (emms-lyrics-sync-display--insert-flat-line win-chars pos-s dur)
@@ -167,6 +179,20 @@
           (emms-lyrics-sync-display--render-header track)
           (emms-lyrics-sync-display--apply-cjk-font (point-min) (point-max))
           (goto-char (point-min)))))))
+
+(defun emms-lyrics-sync-display--auto-scroll (idx)
+  "Scroll the lyrics window so line IDX is positioned 3 lines from the top."
+  (when (and (fboundp 'emms-lyrics-sync-display--window)
+             (emms-lyrics-sync-display--window)
+             (vectorp emms-lyrics-sync-display--line-markers)
+             (< idx (length emms-lyrics-sync-display--line-markers)))
+    (let* ((win (emms-lyrics-sync-display--window))
+           (marker (aref emms-lyrics-sync-display--line-markers idx)))
+      (when (and marker (marker-buffer marker))
+        (with-current-buffer emms-lyrics-sync-display--buffer
+          (goto-char (marker-position marker))
+          (forward-line -3)
+          (set-window-start win (point)))))))
 
 (provide 'emms-lyrics-sync-display-redraw)
 ;;; emms-lyrics-sync-display-redraw.el ends here

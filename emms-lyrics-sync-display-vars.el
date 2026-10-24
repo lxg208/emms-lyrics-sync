@@ -894,5 +894,14 @@ initial rendered in the center."
 (defvar-local emms-lyrics-sync-display--elapsed-marker nil)
 (defvar-local emms-lyrics-sync-display--elapsed-end-marker nil)
 
+(defvar-local emms-lyrics-sync-display--line-markers nil
+  "Vector of markers, one for the start of each lyric line.")
+
+(defvar-local emms-lyrics-sync-waveform--last-px-w nil
+  "The pixel width of the currently displayed waveform image.")
+
+(defvar-local emms-lyrics-sync-waveform--img-start nil
+  "Marker pointing to the exact start of the waveform image in the buffer.")
+
 (provide 'emms-lyrics-sync-display-vars)
 ;;; emms-lyrics-sync-display-vars.el ends here

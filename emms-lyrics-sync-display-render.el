@@ -373,166 +373,44 @@ Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
 ;;; ── Lyrics: Context Window with Fixed Physical Height ────────────────────────
 
 (defun emms-lyrics-sync-display--render-lyrics (doc pos-ms)
-  "Insert the lyrics section for DOC at POS-MS.
-Always occupies exactly `emms-lyrics-sync-display-lyrics-height' physical
-screen lines.
-
-Algorithm (normal path):
-  1. cur-height = count-wrapped-lines(cur-line-text)
-  2. fut-budget = n-after - (cur-height - 1)
-  3. Past: walk BACKWARD from cur-idx-1; accumulate physical rows via
-     count-wrapped-lines; stop when row budget exhausted.
-     A line is only included if its physical height FITS the remaining budget
-     entirely (no partial lines).
-  4. Future: same forward from cur-idx+1 against fut-budget.
-  5. top-pad = n-before - past-phys  blank lines above past lines.
-  6. bot-pad = fut-budget - future-phys  blank lines below future lines.
-
-Pre-roll path (before first timestamp):
-  Mirrors the normal layout as if line-0 were the current line but shown
-  in future-face.  This prevents a visual jump when line-0 fires.
-  Layout: [n-bef blanks] [blank] [line-0 future-face] [blank] [lines 1..k] [bot-pad]
-
-Total = n-bef + 1 + cur-height + 1 + fut-budget = n-bef + n-aft + 3 = lyrics-height."
+  "Insert the full lyrics for DOC at POS-MS, setting faces and markers."
   (setq emms-lyrics-sync-display--word-positions nil)
-  (let* ((n-bef emms-lyrics-sync-display-context-before)
-         (n-aft emms-lyrics-sync-display-context-after))
-    (cond
-     ;; ── No lyrics ──────────────────────────────────────────────────────────
-     ((null doc)
-      (let ((total emms-lyrics-sync-display-lyrics-height))
-        (dotimes (_ (/ total 2)) (insert "\n"))
-        (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
-                            'face 'emms-lyrics-sync-past-line-face) "\n")
-        (let ((remaining (- total (/ total 2) 1)))
-          (dotimes (_ (max 0 remaining)) (insert "\n")))))
-
-     ;; ── Plain (unsynced) text ───────────────────────────────────────────────
-     ((emms-lyrics-sync-lrc-doc-plain-p doc)
-      (let ((lines (emms-lyrics-sync-lrc-doc-lines doc)))
-        (cl-loop for line across lines do
-          (emms-lyrics-sync-display--wrap-and-insert
-           (emms-lyrics-sync-line-text line)
-           'emms-lyrics-sync-future-line-face))))
-
-     ;; ── Synced LRC ─────────────────────────────────────────────────────────
-     (t
-      (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
-             (n       (length lines))
-             (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))
-
-        (if (< cur-idx 0)
-            ;; ── Pre-roll: mirror first-line-as-current layout ───────────────
-            ;; Line 0 shown in future-face IN THE CURRENT SLOT so the layout
-            ;; is identical to what it will be when line-0 fires.  No jump.
-            (let* ((first-line
-                    (and (> n 0) (aref lines 0)))
-                   (first-text
-                    (and first-line (emms-lyrics-sync-line-text first-line)))
-                   (first-height
-                    (if first-line
-                        (emms-lyrics-sync-display--count-wrapped-lines first-text)
-                      1))
-                   (fut-budget (max 0 (- n-aft (- first-height 1))))
-                   ;; Future lines after slot 0
-                   (future-lines
-                    (let (acc (budget fut-budget))
-                      (cl-loop for i from 1 below n
-                               for ltext = (emms-lyrics-sync-line-text (aref lines i))
-                               for lphys = (emms-lyrics-sync-display--count-wrapped-lines ltext)
-                               while (and (> budget 0) (<= lphys budget))
-                               do (push (aref lines i) acc)
-                                  (cl-decf budget lphys))
-                      (nreverse acc)))
-                   (future-phys
-                    (cl-loop for l in future-lines
-                             sum (emms-lyrics-sync-display--count-wrapped-lines
-                                  (emms-lyrics-sync-line-text l))))
-                   (bot-pad (max 0 (- fut-budget future-phys))))
-              ;; n-bef blank rows above current slot
-              (dotimes (_ n-bef) (insert "\n"))
-              ;; Blank separator before current slot
-              (insert "\n")
-              ;; Line 0 in current slot (future-face — not yet playing)
-              (if first-line
-                  (emms-lyrics-sync-display--wrap-and-insert
-                   first-text 'emms-lyrics-sync-future-line-face)
-                (insert "\n"))
-              ;; Blank separator after current slot
-              (insert "\n")
-              ;; Future lines
-              (dolist (line future-lines)
+  (if (null doc)
+      (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
+                          'face 'emms-lyrics-sync-past-line-face) "\n")
+    (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
+           (n       (length lines))
+           (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))
+      
+      ;; Allocate a vector for line markers
+      (setq emms-lyrics-sync-display--line-markers (make-vector n nil))
+      
+      (dotimes (i n)
+        (let* ((line (aref lines i))
+               (ms   (emms-lyrics-sync-line-start-ms line))
+               (text (emms-lyrics-sync-line-text line))
+               (is-current (= i cur-idx)))
+          
+          ;; Record the marker at the very beginning of the line
+          (aset emms-lyrics-sync-display--line-markers i (copy-marker (point) nil))
+          
+          ;; Render the line text
+          (if is-current
+              (if (emms-lyrics-sync-line-words line)
+                  (setq emms-lyrics-sync-display--word-positions
+                        (emms-lyrics-sync-display--render-a2-line line))
                 (emms-lyrics-sync-display--wrap-and-insert
-                 (emms-lyrics-sync-line-text line)
-                 'emms-lyrics-sync-future-line-face))
-              ;; Bottom padding
-              (dotimes (_ bot-pad) (insert "\n")))
-
-          ;; ── Normal: fixed-height context window ────────────────────────────
-          (let* ((cur-line   (aref lines cur-idx))
-                 (cur-text   (emms-lyrics-sync-line-text cur-line))
-                 (cur-height (if (emms-lyrics-sync-line-words cur-line)
-                                 1
-                               (emms-lyrics-sync-display--count-wrapped-lines
-                                cur-text)))
-                 (fut-budget (max 0 (- n-aft (- cur-height 1))))
-                 ;; Past lines: walk backward, accumulate physical rows
-                 (past-lines
-                  (let (acc (budget n-bef))
-                    (cl-loop for i downfrom (1- cur-idx) to 0
-                             for ltext = (emms-lyrics-sync-line-text (aref lines i))
-                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines ltext)
-                             while (and (> budget 0) (<= lphys budget))
-                             do (push (aref lines i) acc)
-                                (cl-decf budget lphys))
-                    acc))
-                 (past-phys
-                  (cl-loop for l in past-lines
-                           sum (emms-lyrics-sync-display--count-wrapped-lines
-                                (emms-lyrics-sync-line-text l))))
-                 (top-pad (max 0 (- n-bef past-phys)))
-                 ;; Future lines: walk forward
-                 (future-lines
-                  (let (acc (budget fut-budget))
-                    (cl-loop for i from (1+ cur-idx) below n
-                             for ltext = (emms-lyrics-sync-line-text (aref lines i))
-                             for lphys = (emms-lyrics-sync-display--count-wrapped-lines ltext)
-                             while (and (> budget 0) (<= lphys budget))
-                             do (push (aref lines i) acc)
-                                (cl-decf budget lphys))
-                    (nreverse acc)))
-                 (future-phys
-                  (cl-loop for l in future-lines
-                           sum (emms-lyrics-sync-display--count-wrapped-lines
-                                (emms-lyrics-sync-line-text l))))
-                 (bot-pad (max 0 (- fut-budget future-phys))))
-            ;; Top padding
-            (dotimes (_ top-pad) (insert "\n"))
-            ;; Past lines
-            (dolist (line past-lines)
-              (emms-lyrics-sync-display--wrap-and-insert
-               (emms-lyrics-sync-line-text line)
-               'emms-lyrics-sync-past-line-face))
-            ;; Blank before current
-            (insert "\n")
-            ;; Current line
-            (if (emms-lyrics-sync-line-words cur-line)
-                (setq emms-lyrics-sync-display--word-positions
-                      (emms-lyrics-sync-display--render-a2-line cur-line))
-              (emms-lyrics-sync-display--wrap-and-insert
-               cur-text 'emms-lyrics-sync-current-line-face))
-            ;; Blank after current
-            (insert "\n")
-            ;; Future lines
-            (dolist (line future-lines)
-              (emms-lyrics-sync-display--wrap-and-insert
-               (emms-lyrics-sync-line-text line)
-               'emms-lyrics-sync-future-line-face))
-            ;; Bottom padding
-            ;; ── PAREN FIX: this closes 6 levels after dotimes:
-            ;;   1. normal-path let*   2. if   3. inner let* (lines/n/cur-idx)
-            ;;   4. (t ...) branch     5. cond  6. outer let* (n-bef/n-aft)
-            (dotimes (_ bot-pad) (insert "\n")))))))))
+                 text 'emms-lyrics-sync-current-line-face))
+            (let ((face (if (< i cur-idx)
+                            'emms-lyrics-sync-past-line-face
+                          'emms-lyrics-sync-future-line-face)))
+              (emms-lyrics-sync-display--wrap-and-insert text face)))
+          
+          ;; Attach the timestamp to the entire line for `RET` to find
+          (when ms
+            (let ((bol (marker-position (aref emms-lyrics-sync-display--line-markers i)))
+                  (eol (point)))
+              (put-text-property bol eol 'emms-lyrics-sync-start-ms ms))))))))
 
 ;;; ── Overlay Management ───────────────────────────────────────────────────────
 

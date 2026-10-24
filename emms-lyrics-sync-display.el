@@ -39,14 +39,12 @@
 ;;; ── Major mode ──────────────────────────────────────────────────────────────
 
 (defvar emms-lyrics-sync-display-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'emms-lyrics-sync-display-hide)
-    map)
-  "Keymap for `emms-lyrics-sync-display-mode'.
-
-Its parent is set to `emms-playlist-mode-map' so all EMMS player
-controls work in this buffer.  `q' hides the entire sidebar group
-atomically (both lyrics and waveform windows), not just this window.")
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "q") #'emms-lyrics-sync-display-hide)
+    (define-key m (kbd "RET") #'emms-lyrics-sync-display--seek-at-point)
+    (define-key m [double-mouse-1] #'emms-lyrics-sync-display--seek-at-point)
+    m)
+  "Keymap for `emms-lyrics-sync-display-mode'.")
 
 (defun emms-lyrics-sync-display--apply-font ()
   "Apply `display-fontset' or `display-font-family' to current buffer.
@@ -124,6 +122,77 @@ baseline."
   (set-keymap-parent emms-lyrics-sync-display-mode-map
                      emms-playlist-mode-map))
 
+(defun emms-lyrics-sync-display--seek-at-point ()
+  "Seek to the timestamp of the lyric line at point, starting playback if stopped."
+  (interactive)
+  (let ((ms (get-text-property (line-beginning-position) 'emms-lyrics-sync-start-ms)))
+    (unless ms
+      (user-error "No timestamp on this line"))
+    (let* ((sec (/ ms 1000.0))
+           (emms-track (emms-playlist-current-selected-track))
+           (file (or emms-lyrics-sync-display--current-file-path
+                     (and emms-track (emms-track-get emms-track 'name)))))
+      (if (emms-lyrics-sync--currently-playing-p)
+          ;; Playing or paused: seek immediately
+          (progn
+            (emms-lyrics-sync-core--mpv-seek sec)
+            ;; Force immediate visual update
+            (setq emms-lyrics-sync-core--mpv-position (float sec))
+            (emms-lyrics-sync-display--tick)
+            ;; Unpause if paused
+            (when (bound-and-true-p emms-player-paused-p)
+              (emms-pause))
+            (message "Seeking to %s" (emms-lyrics-sync-display--format-time sec)))
+        ;; Stopped: start the track and queue the seek
+        (if (and file (file-exists-p file))
+            (progn
+              (setq emms-lyrics-sync-core--pending-seek (cons file sec))
+              (emms-start)
+              (message "Starting track and seeking to %s" (emms-lyrics-sync-display--format-time sec)))
+          (user-error "Cannot seek: no file associated with current lyrics"))))))
+
+(defun emms-lyrics-sync-display--waveform-click (event)
+  "Seek to the clicked X coordinate on the waveform, starting playback if stopped."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (x (car (posn-x-y posn)))
+         (win (posn-window posn))
+         (buf (window-buffer win))
+         (px-w (buffer-local-value 'emms-lyrics-sync-waveform--last-px-w buf))
+         (emms-track (emms-playlist-current-selected-track))
+         (file (or emms-lyrics-sync-display--current-file-path
+                   (and emms-track (emms-track-get emms-track 'name))))
+         (dur-raw (or (and emms-lyrics-sync-core--current-track
+                           (emms-lyrics-sync-track-duration emms-lyrics-sync-core--current-track))
+                      (and emms-track (emms-track-get emms-track 'info-playing-time))))
+         ;; Coerce to a positive number; guard against strings, 0, and nil
+         (dur (cond ((numberp dur-raw) dur-raw)
+                    ((and (stringp dur-raw)
+                          (string-match-p "\\`[0-9]+\\(?:\\.[0-9]+\\)?\\'" dur-raw))
+                     (string-to-number dur-raw))
+                    (t 0))))
+    (when (and px-w (> (or px-w 0) 0) (> dur 0))
+      (let* ((padding-px (* emms-lyrics-sync-waveform-side-padding (frame-char-width)))
+             (rel-x (max 0 (- x padding-px)))
+             (ratio (max 0.0 (min 1.0 (/ rel-x (float px-w)))))
+             (sec   (* ratio dur)))
+        (if (emms-lyrics-sync--currently-playing-p)
+            (progn
+              (emms-lyrics-sync-core--mpv-seek sec)
+              (setq emms-lyrics-sync-core--mpv-position (float sec))
+              (emms-lyrics-sync-display--tick)
+              (when (bound-and-true-p emms-player-paused-p)
+                (emms-pause))
+              (message "Seeking to %s"
+                       (emms-lyrics-sync-display--format-time sec)))
+          (if (and file (file-exists-p file))
+              (progn
+                (setq emms-lyrics-sync-core--pending-seek (cons file sec))
+                (emms-start)
+                (message "Starting track and seeking to %s"
+                         (emms-lyrics-sync-display--format-time sec)))
+            (user-error "Cannot seek: no file associated with current waveform")))))))
+
 ;;;###autoload
 (defun emms-lyrics-sync-display-refresh-font ()
   "Re-apply font settings to the lyrics buffer without restarting Emacs.
@@ -147,9 +216,15 @@ Call after changing `emms-lyrics-sync-display-fontset' or
 
 ;;; ── Waveform buffer ──────────────────────────────────────────────────────────
 
+;; The waveform map already has wheel binds and 'q', just add the mouse-1 bind.
+;; Note: The click map is attached directly to the image, so we don't strictly 
+;; need to define it in the mode map, but it's good for fallback.
 (defvar emms-lyrics-sync-waveform-mode-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "q") #'emms-lyrics-sync-display-hide)
+    ;; Bind left-click to our seek function
+    (define-key m [mouse-1] #'emms-lyrics-sync-display--waveform-click)
+    (define-key m [double-mouse-1] #'emms-lyrics-sync-display--waveform-click)
     m)
   "Keymap for `emms-lyrics-sync-waveform-mode'.
 
