@@ -206,13 +206,11 @@ Accumulates STRING and parses complete newline-delimited JSON objects.
 Updates `emms-lyrics-sync-core--mpv-position' when a time-pos response arrives."
   (setq emms-lyrics-sync-core--mpv-buffer
         (concat emms-lyrics-sync-core--mpv-buffer string))
-  ;; Process all complete lines
   (while (string-match "\n" emms-lyrics-sync-core--mpv-buffer)
     (let ((line (substring emms-lyrics-sync-core--mpv-buffer
                            0 (match-beginning 0))))
       (setq emms-lyrics-sync-core--mpv-buffer
             (substring emms-lyrics-sync-core--mpv-buffer (match-end 0)))
-      ;; Parse and extract time-pos
       (condition-case nil
           (let* ((obj  (json-parse-string line
                                           :object-type  'alist
@@ -221,8 +219,16 @@ Updates `emms-lyrics-sync-core--mpv-position' when a time-pos response arrives."
                  (err  (cdr (assq 'error obj)))
                  (data (cdr (assq 'data  obj))))
             (when (and (equal err "success") (numberp data))
-              (setq emms-lyrics-sync-core--mpv-position (float data))))
-        ;; Ignore malformed lines (mpv also emits event objects)
+              (setq emms-lyrics-sync-core--mpv-position (float data))
+              ;; Apply pending seek now that mpv is actually responsive
+              (when emms-lyrics-sync-core--pending-seek
+                (let ((file (car emms-lyrics-sync-core--pending-seek))
+                      (sec  (cdr emms-lyrics-sync-core--pending-seek)))
+                  (when (and emms-lyrics-sync-core--current-track
+                             (equal file (emms-lyrics-sync-track-file-path
+                                          emms-lyrics-sync-core--current-track)))
+                    (emms-lyrics-sync-core--mpv-seek sec)))
+                (setq emms-lyrics-sync-core--pending-seek nil))))
         (json-parse-error nil)
         (error nil)))))
 
@@ -249,18 +255,9 @@ Returns t on success, nil if the socket is absent or connection fails.
 Safe to call repeatedly — returns immediately if already connected."
   (when (boundp 'emms-player-simple-mpv--socket)
     (setq emms-lyrics-sync-mpv-socket emms-player-simple-mpv--socket))
-  
   (cond
-   ;; 1. Already connected. Just flush any pending seek.
+   ;; 1. Already connected.
    ((process-live-p emms-lyrics-sync-core--mpv-process)
-    (when emms-lyrics-sync-core--pending-seek
-      (let ((file (car emms-lyrics-sync-core--pending-seek))
-            (sec  (cdr emms-lyrics-sync-core--pending-seek)))
-        (when (and emms-lyrics-sync-core--current-track
-                   (equal file (emms-lyrics-sync-track-file-path
-                                emms-lyrics-sync-core--current-track)))
-          (emms-lyrics-sync-core--mpv-seek sec)))
-      (setq emms-lyrics-sync-core--pending-seek nil))
     t)
 
    ;; 2. Not connected, but socket exists. Try to connect.
@@ -280,16 +277,6 @@ Safe to call repeatedly — returns immediately if already connected."
           ;; Reset position cache on fresh connection
           (setq emms-lyrics-sync-core--mpv-position 0.0
                 emms-lyrics-sync-core--mpv-buffer   "")
-
-          ;; Apply pending seek if any (e.g., user clicked a lyric line while stopped)
-          (when emms-lyrics-sync-core--pending-seek
-            (let ((file (car emms-lyrics-sync-core--pending-seek))
-                  (sec  (cdr emms-lyrics-sync-core--pending-seek)))
-              (when (and emms-lyrics-sync-core--current-track
-                         (equal file (emms-lyrics-sync-track-file-path 
-                                      emms-lyrics-sync-core--current-track)))
-                (emms-lyrics-sync-core--mpv-seek sec)))
-            (setq emms-lyrics-sync-core--pending-seek nil))
           t)
       (error
        (unless (string-match-p "Connection refused" (format "%S" err))
@@ -512,9 +499,6 @@ Calls `emms-lyrics-sync-display-on-track-change' when a result is ready."
   (cl-block emms-lyrics-sync-core--on-track-change
   ;; Increment token to invalidate any in-flight fetches for the old track
   (cl-incf emms-lyrics-sync-core--fetch-token)
-  ;; Delayed connect — mpv socket may not be ready immediately on track start
-  (when emms-lyrics-sync-mpv-ipc-enabled
-    (run-with-timer 1.0 nil #'emms-lyrics-sync-core--mpv-connect))
   (catch 'emms-lyrics-sync-core--on-track-change-done
   (let ((token emms-lyrics-sync-core--fetch-token))
     (setq emms-lyrics-sync-core--current-track  track
