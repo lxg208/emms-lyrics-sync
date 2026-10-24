@@ -113,6 +113,8 @@
              ((and (consp cached)
                    (= (plist-get cached :px-w) px-w)
                    (= (plist-get cached :px-h) px-h)
+                   (stringp (plist-get cached :played))
+                   (stringp (plist-get cached :remaining))
                    (file-exists-p (plist-get cached :played))
                    (file-exists-p (plist-get cached :remaining)))
               ;; Success: pad left, then insert image

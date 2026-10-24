@@ -277,7 +277,7 @@ Layout adapts to width:
   >= 25 cols:  elapsed/total │ artist
   <  25 cols:  elapsed/total"
   (let* ((win       (get-buffer-window emms-lyrics-sync-waveform-buffer t))
-	 (width     (if win (window-total-width win) 65))    ; ← was window-body-width
+         (width     (if win (window-total-width win) 65))
          (dur       (and track (emms-lyrics-sync-track-duration track)))
          (elapsed-s (propertize
                      (emms-lyrics-sync-display--format-time
@@ -290,20 +290,23 @@ Layout adapts to width:
          (pipe      (propertize " │ " 'face 'emms-lyrics-sync-past-line-face))
          (dash      (propertize " — " 'face 'emms-lyrics-sync-past-line-face))
          (time      (concat elapsed-s slash dur-s))
-         (artist    (and track (propertize
-                                (emms-lyrics-sync-track-artist track)
-                                'face 'emms-lyrics-sync-artist-face)))
-         (title     (and track (propertize
-                                (emms-lyrics-sync-track-title track)
-                                'face 'emms-lyrics-sync-title-face)))
-         (content   (cond
-                     ((and artist title (>= width 50))
-                      (concat time pipe artist dash title))
-                     ((and artist (>= width 25))
-                      (concat time pipe artist))
-                     (t time)))
-         (content-w (string-width content))
-         (pad       (max 0 (/ (- width content-w) 2))))
+         ;; FIX: Check for nil before calling propertize
+         (artist-raw (and track (emms-lyrics-sync-track-artist track)))
+         (title-raw  (and track (emms-lyrics-sync-track-title track)))
+         (artist     (and artist-raw (propertize
+                                      artist-raw
+                                      'face 'emms-lyrics-sync-artist-face)))
+         (title      (and title-raw (propertize
+                                     title-raw
+                                     'face 'emms-lyrics-sync-title-face)))
+         (content    (cond
+                      ((and artist title (>= width 50))
+                       (concat time pipe artist dash title))
+                      ((and artist (>= width 25))
+                       (concat time pipe artist))
+                      (t time)))
+         (content-w  (string-width content))
+         (pad        (max 0 (/ (- width content-w) 2))))
     (concat (make-string pad ?\s) content)))
 
 ;;; ── Window management ────────────────────────────────────────────────────────
@@ -501,6 +504,7 @@ Guards:
       (emms-lyrics-sync-display--start-timer))))
 
 (defun emms-lyrics-sync-display-on-stop ()
+  "Called when playback stops (not on pause)."
   (when (and (boundp 'emms-lyrics-sync-waveform-height)
              (> emms-lyrics-sync-waveform-height 0))
     (emms-lyrics-sync-display--redraw-waveform-window 0))
