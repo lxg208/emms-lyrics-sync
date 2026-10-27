@@ -372,6 +372,36 @@ Layout adapts to width:
           (unless (zerop delta)
             (ignore-errors (window-resize ww delta nil t))))))))
 
+(defcustom emms-lyrics-sync-display-auto-show-policy 'playlist-visible
+  "When to open the lyrics sidebar automatically on track change.
+
+\='always           — always open the sidebar on every new track.
+\='playlist-visible — open only when the EMMS playlist buffer is visible
+                     in any window on any frame.  If you are working in
+                     another buffer and the playlist is buried, the sidebar
+                     does not pop up.  If the sidebar is already open it is
+                     always updated regardless of this setting.
+\='never            — never open automatically; use \[emms-lyrics-sync-display-show]
+                     to open manually."
+  :type  '(choice (const :tag "Always"            always)
+                  (const :tag "Playlist visible"  playlist-visible)
+                  (const :tag "Never"             never))
+  :group 'emms-lyrics-sync)
+
+(defun emms-lyrics-sync-display--should-auto-show-p ()
+  "Return non-nil if the sidebar should be opened on this track change.
+If the sidebar is already visible the answer is always yes (we only gate
+the *opening* decision, never the *update* decision)."
+  (or
+   ;; Sidebar already open — always update, never close it.
+   (emms-lyrics-sync-display--group-visible-p)
+   ;; Sidebar closed — consult policy.
+   (pcase emms-lyrics-sync-display-auto-show-policy
+     ('always           t)
+     ('playlist-visible (get-buffer-window emms-playlist-buffer-name t))
+     ('never            nil)
+     (_                 t))))
+
 ;;;###autoload
 (defun emms-lyrics-sync-display-show ()	; ← REPLACE
   "Show the lyrics sidebar.  Creates windows if not already visible."
@@ -473,8 +503,11 @@ Guards:
 
       ;; Create windows FIRST so the render functions have accurate
       ;; window geometry (width for centering, height for the resize
-      ;; that --create-windows performs)
-      (emms-lyrics-sync-display-show)
+      ;; that --create-windows performs).
+      ;; Gate on auto-show policy: if the sidebar is already open it is
+      ;; always shown; otherwise consult emms-lyrics-sync-display-auto-show-policy.
+      (when (emms-lyrics-sync-display--should-auto-show-p)
+        (emms-lyrics-sync-display-show))
 
       ;; 1. Lyrics buffer (context window + word overlays)
       (emms-lyrics-sync-display--full-redraw)
