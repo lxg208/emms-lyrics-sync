@@ -1,31 +1,32 @@
 
 # Table of Contents
 
--   [Three-window architecture](#orga3d3f0a)
-    -   [Why three windows instead of one](#org0f9da61)
--   [CJK / Latin font split](#orgf2afc36)
-    -   [x-height calibration](#orgeafb71c)
--   [Waveform generation](#org6a699cc)
-    -   [Filter pipeline](#org698315b)
-    -   [Composite ffmpeg filter](#org547985f)
-    -   [Async generation](#orgb55866b)
--   [Seeking](#orgbbe5e4d)
-        -   [Keyboard](#org4e4068a)
-        -   [Mouse](#orga2276a9)
-        -   [Stopped case](#orgeba6855)
-        -   [Paused case](#orgbd55a84)
-        -   [Track positioning](#org4cab662)
--   [Source pipeline](#orge5e03b4)
--   [mpv IPC](#orgb00e476)
--   [Emacs display-engine quirks encountered](#org2625068)
--   [Testing checklist](#org2264d53)
--   [Roadmap (optional)](#orgfb0e8ea)
+-   [Three-window architecture](#org7af2b27)
+    -   [Why three windows instead of one](#org3733e17)
+-   [CJK / Latin font split](#orgebded60)
+    -   [x-height calibration](#org30ebfa7)
+-   [Waveform generation](#org5008798)
+    -   [Filter pipeline](#orgc135802)
+    -   [Composite ffmpeg filter](#org4dd97a4)
+    -   [Async generation](#orgf806b4e)
+-   [Seeking](#orgdfc7ff1)
+        -   [Keyboard](#org6d9207b)
+        -   [Mouse](#orge12a2a2)
+        -   [Stopped case](#org6ab3d57)
+        -   [Paused case](#orgcced6de)
+        -   [Track positioning](#org3eae04e)
+-   [Source pipeline](#org449d502)
+-   [mpv IPC](#orgce46c69)
+    -   [socat teardown race](#org6ee2c68)
+-   [Emacs display-engine quirks encountered](#orge5ab6a7)
+-   [Testing checklist](#orge67bedf)
+-   [Roadmap (optional)](#orgbcf9e86)
 
 Notes on architecture, key decisions, and display-engine quirks.  Aimed
 at contributors and at future maintainers (including future-you).
 
 
-<a id="orga3d3f0a"></a>
+<a id="org7af2b27"></a>
 
 # Three-window architecture
 
@@ -49,7 +50,7 @@ bound to `emms-lyrics-sync-display-hide` in each mode's keymap, which
 calls `(delete-window (window-atom-root (selected-window)))`.
 
 
-<a id="org0f9da61"></a>
+<a id="org3733e17"></a>
 
 ## Why three windows instead of one
 
@@ -76,7 +77,7 @@ jitter by construction.  The waveform cannot move.  Once this landed,
 empirical ceiling (per-machine, ~1.10–1.15) no longer applies.
 
 
-<a id="orgf2afc36"></a>
+<a id="orgebded60"></a>
 
 # CJK / Latin font split
 
@@ -108,7 +109,7 @@ punctuation.  `get-char-code-property` with 'script does not work
 exposed through that function).
 
 
-<a id="orgeafb71c"></a>
+<a id="org30ebfa7"></a>
 
 ## x-height calibration
 
@@ -126,7 +127,7 @@ unibyte with `file-name-coding-system` before use in `message` or
 process arguments.
 
 
-<a id="org6a699cc"></a>
+<a id="org5008798"></a>
 
 # Waveform generation
 
@@ -147,7 +148,7 @@ ffmpeg call is ~20–50 ms on the fast build, well below the 100 ms
 tick budget.
 
 
-<a id="org698315b"></a>
+<a id="orgc135802"></a>
 
 ## Filter pipeline
 
@@ -168,7 +169,7 @@ rectangle either way, and linear is a more accurate representation of
 what's actually in the file.
 
 
-<a id="org547985f"></a>
+<a id="org4dd97a4"></a>
 
 ## Composite ffmpeg filter
 
@@ -181,7 +182,7 @@ negotiation falls through to YUV 4:2:0 which requires even dimensions
 and silently truncates.
 
 
-<a id="orgb55866b"></a>
+<a id="orgf806b4e"></a>
 
 ## Async generation
 
@@ -191,12 +192,12 @@ the Unicode flat bar renders as a placeholder during the wait and is
 replaced by the composite PNG when the sentinel fires.
 
 
-<a id="orgbbe5e4d"></a>
+<a id="orgdfc7ff1"></a>
 
 # Seeking
 
 
-<a id="org4e4068a"></a>
+<a id="org6d9207b"></a>
 
 ### Keyboard
 
@@ -205,7 +206,7 @@ text property during render).  Works for both synced LRC and A2
 (word-level) lines.
 
 
-<a id="orga2276a9"></a>
+<a id="orge12a2a2"></a>
 
 ### Mouse
 
@@ -215,7 +216,7 @@ deterministic — no reliance on `posn-at-point` of the image, which
 returns inconsistent results for inline images.
 
 
-<a id="orgeba6855"></a>
+<a id="org6ab3d57"></a>
 
 ### Stopped case
 
@@ -227,7 +228,7 @@ the socket becomes reachable.  On WSL this is important: mpv takes
 completes are silently discarded.
 
 
-<a id="orgbd55a84"></a>
+<a id="orgcced6de"></a>
 
 ### Paused case
 
@@ -236,7 +237,7 @@ Both handlers call `emms-pause` after seeking if
 position.
 
 
-<a id="org4cab662"></a>
+<a id="org3eae04e"></a>
 
 ### Track positioning
 
@@ -249,7 +250,7 @@ point.  The correct positional accessor is
 selection must be synced via `emms-playlist-select (point)`.
 
 
-<a id="orge5e03b4"></a>
+<a id="org449d502"></a>
 
 # Source pipeline
 
@@ -271,7 +272,7 @@ Ordering rationale:
 -   `lyricsovh` last: plain text, fallback only
 
 
-<a id="orgb00e476"></a>
+<a id="orgce46c69"></a>
 
 # mpv IPC
 
@@ -284,7 +285,17 @@ Both native mpv (via `--input-ipc-server`) and WSL Windows mpv (via
 transparently because the JSON IPC protocol is identical.
 
 
-<a id="org2625068"></a>
+<a id="org6ee2c68"></a>
+
+## socat teardown race
+
+Stop tears down socat before mpv closes the pipe; the 1-s
+run-with-timer in &ndash;on-stop is load-bearing.  Start now waits
+up to 4 s for the old process to fully exit before launching a
+new one, and aborts + kills the orphan mpv if socat still fails.
+
+
+<a id="orge5ab6a7"></a>
 
 # Emacs display-engine quirks encountered
 
@@ -367,7 +378,7 @@ Workarounds in the package:
     `current-selected-track`
 
 
-<a id="org2264d53"></a>
+<a id="orge67bedf"></a>
 
 # Testing checklist
 
@@ -389,7 +400,7 @@ machines (or at least one WSL and one native Linux):
     waveform still generated
 
 
-<a id="orgfb0e8ea"></a>
+<a id="orgbcf9e86"></a>
 
 # Roadmap (optional)
 

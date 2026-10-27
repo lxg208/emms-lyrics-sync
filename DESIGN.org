@@ -219,6 +219,12 @@ Both native mpv (via =--input-ipc-server=) and WSL Windows mpv (via
 =socat= bridging the Unix socket to a Windows named pipe) work
 transparently because the JSON IPC protocol is identical.
 
+** socat teardown race
+Stop tears down socat before mpv closes the pipe; the 1-s
+run-with-timer in --on-stop is load-bearing.  Start now waits
+up to 4 s for the old process to fully exit before launching a
+new one, and aborts + kills the orphan mpv if socat still fails.
+
 * Emacs display-engine quirks encountered
 
 Documented here so the next contributor doesn't re-discover them:
