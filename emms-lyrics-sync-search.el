@@ -88,8 +88,11 @@ Records the value's buffer span in `emms-lyrics-sync-search--fields'."
          (val-start nil)
          (val-end   nil))
     (insert (propertize label 'face 'font-lock-keyword-face
-                               'read-only t
-                               'field     'label))
+                               'read-only      t
+                               ;; Prevent read-only from propagating into the
+                               ;; editable value region that follows the label.
+                               'rear-nonsticky '(read-only face field)
+                               'field          'label))
     (setq val-start (point))
     (insert (propertize (or value "")
                         'face               'font-lock-string-face
@@ -158,12 +161,13 @@ Records the value's buffer span in `emms-lyrics-sync-search--fields'."
     m)
   "Keymap for `emms-lyrics-sync-search-mode'.")
 
-(define-derived-mode emms-lyrics-sync-search-mode special-mode "Lyrics-Search"
+(define-derived-mode emms-lyrics-sync-search-mode nil "Lyrics-Search"
   "Major mode for the emms-lyrics-sync manual search input buffer."
-  (setq-local revert-buffer-function #'ignore))
-
-;; Allow editing in field regions despite special-mode's read-only inhibit
-(put 'emms-lyrics-sync-search-mode 'mode-class 'special)
+  (setq-local revert-buffer-function #'ignore)
+  ;; special-mode sets buffer-read-only t for the whole buffer, but we need
+  ;; the value regions to be editable.  Text-property read-only on the labels
+  ;; is sufficient to protect them; we don't need a blanket buffer lock.
+  (setq buffer-read-only nil))
 
 ;;;###autoload
 (defun emms-lyrics-sync-search (&optional track)
@@ -247,7 +251,7 @@ Pre-fills all metadata fields; user edits and confirms with \\[emms-lyrics-sync-
 (defun emms-lyrics-sync-search-cancel ()
   "Close the search buffer without searching."
   (interactive)
-  (kill-buffer (current-buffer)))
+  (quit-window t))
 
 (defun emms-lyrics-sync-search-execute ()
   "Run the manual search using the current field values and selected sources."
@@ -273,7 +277,12 @@ Pre-fills all metadata fields; user edits and confirms with \\[emms-lyrics-sync-
          (search-buf (current-buffer)))
     (unless sources
       (user-error "No sources selected"))
-    (kill-buffer search-buf)
+    ;; Close the search window and kill its buffer.  Plain kill-buffer
+    ;; leaves the window open showing whatever was behind it.
+    (let ((search-win (get-buffer-window search-buf)))
+      (kill-buffer search-buf)
+      (when (and (window-live-p search-win) (not (one-window-p search-win)))
+        (delete-window search-win)))
     ;; Query all selected sources in parallel
     (message "emms-lyrics: searching %d source(s)…" (length sources))
     (emms-lyrics-sync-search--query-parallel
@@ -301,12 +310,30 @@ sorted by source priority.  Waits up to `emms-lyrics-sync-search-timeout' second
           (funcall src track
                    (let ((i idx))
                      (lambda (result)
-                       (aset results i result)
-                       (cl-incf done-count)
-                       (when (= done-count n-sources)
-                         (cancel-timer deadline)
-                         (funcall callback
-                                  (delq nil (append results nil)))))))
+                       ;; Inner condition-case: plz delivers responses via
+                       ;; plz--respond, a timer that fires outside the outer
+                       ;; condition-case below.  If that timer crashes (e.g.
+                       ;; void-variable point in older plz), the lambda is
+                       ;; never called and done-count is never incremented.
+                       ;; This inner guard ensures done-count advances even
+                       ;; when the callback itself errors, so the parallel
+                       ;; engine always terminates cleanly.
+                       (condition-case cb-err
+                           (progn
+                             (aset results i result)
+                             (cl-incf done-count)
+                             (when (= done-count n-sources)
+                               (cancel-timer deadline)
+                               (funcall callback
+                                        (delq nil (append results nil)))))
+                         (error
+                          (message "emms-lyrics-sync-search: async callback error (source %d): %S"
+                                   i cb-err)
+                          (cl-incf done-count)
+                          (when (= done-count n-sources)
+                            (cancel-timer deadline)
+                            (funcall callback
+                                     (delq nil (append results nil)))))))))
         (error
          (message "emms-lyrics-sync-search: source %S error: %S" src err)
          (cl-incf done-count)
@@ -400,39 +427,118 @@ sorted by source priority.  Waits up to `emms-lyrics-sync-search-timeout' second
 
 (defun emms-lyrics-sync-results--highlight-current ()
   "Highlight the result row at point."
-  (let ((inhibit-read-only t))
+  (let* ((inhibit-read-only t)
+	(cur-idx (emms-lyrics-sync-results--current-idx)))
     (save-excursion
       (goto-char (point-min))
       (while (not (eobp))
         (let* ((idx    (get-text-property (point) 'emms-result))
                (end    (or (next-single-property-change (point) 'emms-result)
-                           (point-max)))
-               (cur-idx (emms-lyrics-sync-results--current-idx)))
+                           (point-max))))
           (when idx
-            (put-text-property point end 'face
+            (put-text-property (point) end 'face
                                (if (eq idx cur-idx) 'highlight 'default)))
           (goto-char (or end (point-max))))))))
 
 (defun emms-lyrics-sync-results-preview ()
-  "Show the raw lyrics content of the result at point in a temp buffer."
+  "Show the raw lyrics content of the result at point in a temp buffer.
+The preview buffer is read-only.
+  q    — close preview, return to Lyrics Results
+  n/p  — navigate to next/previous source and reload preview in place"
   (interactive)
   (let ((idx (emms-lyrics-sync-results--current-idx)))
     (when idx
-      (let* ((result  (aref emms-lyrics-sync-results--items idx))
-             (content (emms-lyrics-sync-result-content result))
-             (buf     (get-buffer-create "*emms-lyrics-sync-preview*")))
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert content)
-            (goto-char (point-min))))
-        (display-buffer buf '(display-buffer-below-selected
-                               (window-height . 20)))))))
+      (let* ((buf         (get-buffer-create "*emms-lyrics-sync-preview*"))
+             ;; Capture results-win and results-buf BEFORE pop-to-buffer
+             ;; moves focus into the preview window.
+             (results-win (selected-window))
+             (results-buf (current-buffer)))
+
+        ;; ── Inner helper: pull content + header from whichever row is current ──
+        (cl-labels
+            ((load-preview
+              ()
+              (let* ((n-total  (with-current-buffer results-buf
+                                 (length emms-lyrics-sync-results--items)))
+                     (cur-idx  (with-current-buffer results-buf
+                                 (emms-lyrics-sync-results--current-idx)))
+                     (result   (when cur-idx
+                                 (with-current-buffer results-buf
+                                   (aref emms-lyrics-sync-results--items cur-idx))))
+                     (content  (when result (emms-lyrics-sync-result-content result)))
+                     (source   (when result (emms-lyrics-sync-result-source  result)))
+                     (fmt      (when result (emms-lyrics-sync-result-format   result)))
+                     (label    (when source (emms-lyrics-sync-search--source-label source)))
+                     (fmt-s    (pcase fmt
+                                 ('lrc    "[synced LRC]")
+                                 ('lrc-a2 "[synced A2 LRC]")
+                                 (_       "[plain text]"))))
+                (when content
+                  (with-current-buffer buf
+                    (let ((inhibit-read-only t))
+                      (erase-buffer)
+                      ;; ── Header matching show-results style ──────────────
+                      (insert (propertize
+                               (format "  Preview [%d/%d]  %s  %s
+"
+                                       (1+ cur-idx) n-total label fmt-s)
+                               'face '(:height 1.2 :weight bold)))
+                      (insert (propertize (make-string 60 ?─) 'face 'shadow))
+                      (insert "
+
+")
+                      (insert content)
+                      (goto-char (point-min))))))))
+
+          ;; Populate for the initially selected row
+          (load-preview)
+
+          (with-current-buffer buf
+            (setq buffer-read-only t)
+
+	    ;; q — return to results at wherever n/p left the cursor
+	    (local-set-key
+	     (kbd "q")
+	     (lambda ()
+	       (interactive)
+	       (let ((pos (with-current-buffer results-buf (point))))
+		 (kill-buffer (current-buffer))
+		 (set-window-buffer (selected-window) results-buf)
+		 (set-window-point (selected-window) pos))))
+
+            ;; n — move to next result row, reload preview content + header
+	    (local-set-key
+	     (kbd "n")
+	     (lambda ()
+	       (interactive)
+	       (with-current-buffer results-buf
+		 (emms-lyrics-sync-results-next))
+	       (load-preview)))
+
+            ;; p — move to previous result row, reload preview content + header
+	    (local-set-key
+	     (kbd "p")
+	     (lambda ()
+	       (interactive)
+	       (with-current-buffer results-buf
+		 (emms-lyrics-sync-results-prev))
+	       (load-preview)))
+
+          ;; pop-to-buffer: moves focus INTO the preview window so our
+          ;; local keybindings (q/n/p) are immediately active.
+          ;; (pop-to-buffer buf '(display-buffer-below-selected
+                                ;; (window-height . 20)))
+	  (switch-to-buffer buf)))))))
 
 (defun emms-lyrics-sync-results-cancel ()
   "Close the results buffer without applying any result."
   (interactive)
-  (kill-buffer (current-buffer)))
+  (let ((win (selected-window))
+        (buf (current-buffer)))
+    (kill-buffer buf)
+    ;; ignore-errors: delete-window fails when win is the sole non-side
+    ;; window; the buffer is already gone so the error is harmless.
+    (ignore-errors (delete-window win))))
 
 (defun emms-lyrics-sync-results-accept ()
   "Apply the currently highlighted result and close the results buffer."
@@ -446,12 +552,16 @@ sorted by source priority.  Waits up to `emms-lyrics-sync-search-timeout' second
       (emms-lyrics-sync-core--parse-result result)
       ;; Save to sidecar / cache
       (when track
-        (emms-lyrics-sync-core--write-cache track result))
+        (emms-lyrics-sync-core--write-sidecar
+         track (emms-lyrics-sync-result-content result)))
       ;; Update live state and refresh display
       (setq emms-lyrics-sync-core--current-result  result
             emms-lyrics-sync-search--last-results  (append emms-lyrics-sync-results--items nil)
             emms-lyrics-sync-search--last-result-idx idx)
-      (kill-buffer (current-buffer))
+      (let ((win (selected-window))
+            (buf (current-buffer)))
+        (kill-buffer buf)
+        (ignore-errors (delete-window win)))
       (emms-lyrics-sync-display-on-track-change)
       (message "emms-lyrics: applied result from %S"
                (emms-lyrics-sync-result-source result)))))
@@ -472,7 +582,8 @@ If no previous results exist, falls back to `emms-lyrics-sync-search'."
       (setq emms-lyrics-sync-search--last-result-idx new-idx)
       (emms-lyrics-sync-core--parse-result result)
       (when track
-        (emms-lyrics-sync-core--write-cache track result))
+        (emms-lyrics-sync-core--write-sidecar
+         track (emms-lyrics-sync-result-content result)))
       (setq emms-lyrics-sync-core--current-result result)
       (emms-lyrics-sync-display-on-track-change)
       (message "emms-lyrics: source %d/%d — %S"

@@ -182,26 +182,14 @@ Reconnects mpv IPC if it was dropped while paused."
 
 ;;; ── User-Facing Commands ─────────────────────────────────────────────────────
 
-;;;###autoload
-(defun emms-lyrics-sync-search (&optional track)
-  "Open the manual lyrics search UI for TRACK (default: current track).
-Pre-fills all metadata fields from the track; the user may edit them
-before confirming the search with \\[emms-lyrics-sync-search-execute]."
-  (interactive)
-  (let ((cur-track (or track emms-lyrics-sync-core--current-track)))
-    (unless cur-track
-      (user-error "No track is currently playing"))
-    (emms-lyrics-sync-search--query-parallel cur-track)))
+;; NOTE: `emms-lyrics-sync-search' and `emms-lyrics-sync-next-source' are
+;; defined in emms-lyrics-sync-search.el (loaded above via `require').
+;; Do NOT redefine them here — doing so shadows the correct implementations
+;; and causes arity / undefined-function errors at runtime.
+;;   Bug A: stub called (emms-lyrics-sync-search--query-parallel cur-track)
+;;           with 1 arg instead of the required 3.
+;;   Bug B: stub called emms-lyrics-sync-search-cycle-next which never existed.
 
-;;;###autoload
-(defun emms-lyrics-sync-next-source ()
-  "Apply the next search result candidate without reopening the search UI.
-Cycles through the result list from the last manual search.
-Mirrors the OpenLyrics \"next\" keybinding in foobar2000."
-  (interactive)
-  (unless emms-lyrics-sync-core--current-track
-    (user-error "No track is currently playing"))
-  (emms-lyrics-sync-search-cycle-next))
 
 ;;;###autoload
 (defun emms-lyrics-sync-toggle-window ()
