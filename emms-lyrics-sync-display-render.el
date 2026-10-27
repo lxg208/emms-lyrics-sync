@@ -112,50 +112,221 @@ window to fit the frame."
             (puthash key 'none emms-lyrics-sync-display--cover-cache)
             nil)))))))
 
+;; (defvar emms-lyrics-sync-display--placeholder-colors
+;;   '("#00E5FF"  ; Cyan A400
+;;     "#1DE9B6"  ; Teal A400
+;;     "#448AFF"  ; Blue A200
+;;     "#FF4081"  ; Pink A200
+;;     "#7C4DFF"  ; Deep Purple A200
+;;     "#FFAB40"  ; Orange A200
+;;     "#69F0AE"  ; Green A200
+;;     "#FF6E40"  ; Deep Orange A200
+;;     "#40C4FF"  ; Light Blue A200
+;;     "#E040FB") ; Purple A200
+;;   "Vivid Material accent colors for placeholder cover shapes.")
+
 (defvar emms-lyrics-sync-display--placeholder-colors
-  '("#1E88E5" ; Blue 600
-    "#00897B" ; Teal 600
-    "#8E24AA" ; Purple 600
-    "#F4511E" ; Deep Orange 600
-    "#3949AB" ; Indigo 600
-    "#00ACC1" ; Cyan 600
-    "#D81B60" ; Pink 600
-    "#43A047" ; Green 600
-    "#546E7A" ; Blue Grey 600
-    "#5E35B1") ; Deep Purple 600
-  "Material Design 600-level colors used for placeholder covers.")
+  '("#1565C0" ; Blue 800
+    "#00695C" ; Teal 800
+    "#4527A0" ; Deep Purple 800
+    "#00838F" ; Cyan 800
+    "#AD1457" ; Pink 800
+    "#2E7D32" ; Green 800
+    "#E65100" ; Deep Orange 800
+    "#1A237E" ; Indigo 900
+    "#37474F" ; Blue Grey 800
+    "#6A1B9A") ; Purple 800
+  "Material Design 800-level colors for placeholder cover circles.")
+
+(defvar emms-lyrics-sync-display--placeholder-shapes
+  '(circle ellipse-h ellipse-v rect)
+  "Shape types for placeholder cover generation.
+circle    — equal rx/ry
+ellipse-h — wide ellipse (rx > ry)
+ellipse-v — tall ellipse (rx < ry)
+rect      — rounded rectangle, possibly rotated")
 
 (defun emms-lyrics-sync-display--placeholder-image (track height)
   "Generate deterministic placeholder SVG for TRACK at HEIGHT pixels.
 
-Background color is deterministically chosen from a curated list of
-Material Design colors based on a hash of the file path, ensuring the
-same track always produces the same image.  The initial is rendered in
-white.  Returns nil if SVG is unsupported or HEIGHT is zero."
+Picks 4-7 shapes; shape type and color are chosen independently from
+their respective lists, all derived from a SHA-256 hash of
+artist+album+path so the same track always produces the same image.
+Returns nil when SVG is unsupported or HEIGHT is zero."
   (when (and (display-graphic-p) (> height 0))
-    (let* ((key    (or (and track (emms-lyrics-sync-track-file-path track)) ""))
-           (hash   (md5 key))
-           ;; Use the first 4 hex chars to get a 16-bit int, then modulo
-           ;; by the number of colors to pick an index deterministically.
-           (hash-int (string-to-number (substring hash 0 4) 16))
-           (color  (nth (mod hash-int
-                             (length emms-lyrics-sync-display--placeholder-colors))
-                        emms-lyrics-sync-display--placeholder-colors))
-           (artist (and track (emms-lyrics-sync-track-artist track)))
-           (initial (if (and artist (> (length artist) 0))
-                        (let ((c (substring artist 0 1)))
-                          ;; Escape XML-unsafe characters
-                          (if (string-match-p "[<>&\"']" c) "♪" c))
-                      "♪"))
-           (font-sz (round (* height 0.45)))
-           (svg (format (concat "<svg xmlns='http://www.w3.org/2000/svg'"
-                                " width='%d' height='%d'>"
-                                "<rect width='100%%' height='100%%' fill='%s'/>"
-                                "<text x='50%%' y='52%%' fill='#FFFFFF' font-size='%d'"
-                                " font-family='sans-serif' text-anchor='middle'"
-                                " dominant-baseline='central'>%s</text></svg>")
-                        height height color font-sz initial)))
+    (let* ((artist  (or (and track (emms-lyrics-sync-track-artist track)) ""))
+           (album   (or (and track (emms-lyrics-sync-track-album  track)) ""))
+           (fp      (or (and track (emms-lyrics-sync-track-file-path track)) ""))
+           (hash    (secure-hash 'sha256 (concat artist "|" album "|" fp)))
+           ;; Extract Nth byte (0-based) from hex hash as integer 0-255
+           (byte    (lambda (n)
+                      (string-to-number
+                       (substring hash (* n 2) (+ (* n 2) 2)) 16)))
+           (rng     (lambda (b lo hi)
+                      (+ lo (round (* (- hi lo) (/ (funcall byte b) 255.0))))))
+           (w height) (h height)
+           (ncolors (length emms-lyrics-sync-display--placeholder-colors))
+           (nshapes (length emms-lyrics-sync-display--placeholder-shapes))
+           ;; Number of shapes: 4-7 driven by hash byte 0
+           (n-shapes (+ 4 (mod (funcall byte 0) 4)))
+           ;; Rotation pool for rect shapes (bytes 1-3, safely within 0-31)
+           (rot-pool (list (funcall rng 1 -20 20)
+                           (funcall rng 2 -15 15)
+                           (funcall rng 3  10 25)))
+           ;; Build shape SVG strings
+           ;; Bytes 4..31 drive per-shape geometry (7 shapes × 4 bytes = 28,
+           ;; so max byte index = 4 + 6*4 + 3 = 31 — within SHA256's 0-31).
+           (shapes-svg
+            (let ((result "")
+                  (rot-idx 0)
+                  (geo-byte 4))   ; geometry bytes start at 4
+              (dotimes (i n-shapes)
+                (let* ((off     (* i 3))
+                       ;; Shape and color chosen from SEPARATE lists
+                       (shape   (nth (mod (funcall byte (+ 1 off)) nshapes)
+                                     emms-lyrics-sync-display--placeholder-shapes))
+                       (color   (nth (mod (funcall byte (+ 2 off)) ncolors)
+                                     emms-lyrics-sync-display--placeholder-colors))
+                       (opacity (+ 0.20 (* 0.15 (/ (funcall byte (+ 3 off)) 255.0))))
+                       ;; Center position: keep shapes mostly within bounds
+                       (cx (funcall rng geo-byte
+                                    (round (* w 0.18)) (round (* w 0.80))))
+                       (cy (funcall rng (+ geo-byte 1)
+                                    (round (* h 0.18)) (round (* h 0.72))))
+                       (piece
+                        (pcase shape
+                          ('circle
+                           (let ((r (funcall rng (+ geo-byte 2)
+                                             (round (* h 0.20))
+                                             (round (* h 0.34)))))
+                             (format
+                              "<circle cx='%d' cy='%d' r='%d' fill='%s' fill-opacity='%.2f'/>"
+                              cx cy r color opacity)))
+                          ('ellipse-h
+                           (let ((rx (funcall rng (+ geo-byte 2)
+                                              (round (* w 0.28)) (round (* w 0.40))))
+                                 (ry (funcall rng (+ geo-byte 3)
+                                              (round (* h 0.10)) (round (* h 0.18)))))
+                             (format
+                              "<ellipse cx='%d' cy='%d' rx='%d' ry='%d' fill='%s' fill-opacity='%.2f'/>"
+                              cx cy rx ry color opacity)))
+                          ('ellipse-v
+                           (let ((rx (funcall rng (+ geo-byte 2)
+                                              (round (* w 0.10)) (round (* w 0.16))))
+                                 (ry (funcall rng (+ geo-byte 3)
+                                              (round (* h 0.24)) (round (* h 0.36)))))
+                             (format
+                              "<ellipse cx='%d' cy='%d' rx='%d' ry='%d' fill='%s' fill-opacity='%.2f'/>"
+                              cx cy rx ry color opacity)))
+                          ('rect
+                           (let* ((rw  (funcall rng (+ geo-byte 2)
+                                                (round (* w 0.30)) (round (* w 0.48))))
+                                  (rh  (funcall rng (+ geo-byte 3)
+                                                (round (* h 0.13)) (round (* h 0.22))))
+                                  (rot (nth (mod rot-idx 3) rot-pool))
+                                  (rrx (round (* w 0.016))))
+                             (setq rot-idx (1+ rot-idx))
+                             (format
+                              (concat "<rect x='%d' y='%d' width='%d' height='%d' rx='%d'"
+                                      " fill='%s' fill-opacity='%.2f'"
+                                      " transform='rotate(%d %d %d)'/>")
+                              (- cx (/ rw 2)) (- cy (/ rh 2)) rw rh rrx
+                              color opacity rot cx cy))))))
+                  (setq result   (concat result piece))
+                  (setq geo-byte (+ geo-byte 4))))
+              result))
+           ;; ── Text fields ───────────────────────────────────────────────
+           (initial
+            (if (> (length artist) 0)
+                (let ((c (substring artist 0 1)))
+                  (if (string-match-p "[<>&\"']" c) "♪" c))
+              "♪"))
+           (artist-display
+            (if (> (length artist) 0)
+                (if (> (length artist) 18)
+                    (concat (substring artist 0 17) "…")
+                  artist)
+              "Unknown"))
+           (album-display
+            (if (> (length album) 0)
+                (if (> (length album) 24)
+                    (concat (substring album 0 23) "…")
+                  album)
+              ""))
+           (font-sz  (round (* h 0.39)))
+           (sep-y    (round (* h 0.836)))
+           (sep-x1   (round (* w 0.33)))
+           (sep-x2   (round (* w 0.67)))
+           (artist-y (round (* h 0.886)))
+           (album-y  (round (* h 0.940)))
+           ;; ── Assemble SVG ──────────────────────────────────────────────
+           (svg
+            (format
+             (concat
+              "<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d'>"
+              "<defs>"
+              "<radialGradient id='bg' cx='50%%' cy='45%%' r='75%%'>"
+              "<stop offset='0%%'   stop-color='#0D2137'/>"
+              "<stop offset='100%%' stop-color='#040C14'/>"
+              "</radialGradient>"
+              "<radialGradient id='vig' cx='50%%' cy='50%%' r='70%%'>"
+              "<stop offset='55%%' stop-color='#000000' stop-opacity='0'/>"
+              "<stop offset='100%%' stop-color='#000000' stop-opacity='0.55'/>"
+              "</radialGradient>"
+              "</defs>"
+              ;; Background
+              "<rect width='%d' height='%d' fill='url(#bg)'/>"
+              ;; Shapes (inserted as literal string — no format directives inside)
+              "%s"
+              ;; Vignette
+              "<rect width='%d' height='%d' fill='url(#vig)'/>"
+              ;; Initial
+              "<text x='%d' y='%d'"
+              " fill='#FFFACD' fill-opacity='0.93'"
+              " font-size='%d' font-family='sans-serif' font-weight='300'"
+              " text-anchor='middle' dominant-baseline='central'>%s</text>"
+              ;; Bottom text backdrop
+              "<rect x='0' y='%d' width='%d' height='%d'"
+              " fill='#000000' fill-opacity='0.38'/>"
+              ;; Separator
+              "<rect x='%d' y='%d' width='%d' height='1'"
+              " fill='#FFFACD' fill-opacity='0.40'/>"
+              ;; Artist name
+              "<text x='%d' y='%d'"
+              " fill='#FFFACD'"
+              " font-size='%d' font-family='sans-serif' font-weight='500'"
+              " text-anchor='middle' letter-spacing='3'>%s</text>"
+              ;; Album name
+              "<text x='%d' y='%d'"
+              " fill='#FFFACD' fill-opacity='0.65'"
+              " font-size='%d' font-family='sans-serif' font-weight='300'"
+              " text-anchor='middle' letter-spacing='2'>%s</text>"
+              "</svg>")
+             ;; SVG dimensions
+             w h
+             ;; Background rect
+             w h
+             ;; Shapes (literal string)
+             shapes-svg
+             ;; Vignette rect
+             w h
+             ;; Initial
+             (round (* w 0.50)) (round (* h 0.50))
+             font-sz initial
+             ;; Backdrop rect
+             (round (* h 0.800)) w (round (* h 0.200))
+             ;; Separator
+             sep-x1 sep-y (- sep-x2 sep-x1)
+             ;; Artist
+             (round (* w 0.50)) artist-y
+             (round (* h 0.048))
+             artist-display
+             ;; Album
+             (round (* w 0.50)) album-y
+             (round (* h 0.034))
+             album-display)))
       (ignore-errors (create-image svg 'svg t :scale 1.0)))))
+
 
 (defun emms-lyrics-sync-display--cover-or-placeholder (track height)
   "Return cover image for TRACK at HEIGHT, or deterministic placeholder.

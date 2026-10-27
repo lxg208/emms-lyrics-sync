@@ -443,6 +443,7 @@ sorted by source priority.  Waits up to `emms-lyrics-sync-search-timeout' second
 (defun emms-lyrics-sync-results-preview ()
   "Show the raw lyrics content of the result at point in a temp buffer.
 The preview buffer is read-only.
+  RET  — accept current lyrics and close preview
   q    — close preview, return to Lyrics Results
   n/p  — navigate to next/previous source and reload preview in place"
   (interactive)
@@ -495,6 +496,18 @@ The preview buffer is read-only.
 
           (with-current-buffer buf
             (setq buffer-read-only t)
+
+	    ;; RET — accept current result, close both preview and results
+            (local-set-key
+             (kbd "RET")
+             (lambda ()
+               (interactive)
+               (let ((pos (with-current-buffer results-buf (point))))
+                 (kill-buffer (current-buffer))
+                 (set-window-buffer (selected-window) results-buf)
+                 (set-window-point (selected-window) pos))
+               ;; Now in results context — delegate to the normal accept fn
+               (emms-lyrics-sync-results-accept)))
 
 	    ;; q — return to results at wherever n/p left the cursor
 	    (local-set-key
