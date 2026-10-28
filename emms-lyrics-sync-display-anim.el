@@ -437,8 +437,15 @@ The overlay and last image are preserved — the display is not blank."
 
 ;;;###autoload
 (defun emms-lyrics-sync-display-anim-resume ()
-  "Unfreeze the animation (called when playback resumes)."
-  (setq emms-lyrics-sync-display-anim--paused nil))
+  "Unfreeze the animation (called when playback resumes).
+Renders one frame immediately so the display updates without waiting
+for the next tick-divisor boundary (up to 300 ms at divisor=3)."
+  (setq emms-lyrics-sync-display-anim--paused nil)
+  ;; Reset the tick counter to 0 so the very next tick-update call
+  ;; (mod tick divisor) = 0 and triggers a render immediately.
+  ;; This avoids duplicating the SVG generation logic here.
+  (setq emms-lyrics-sync-display-anim--tick 0)
+  (emms-lyrics-sync-display-anim-tick-update))
 
 ;;;###autoload
 (defun emms-lyrics-sync-display-anim-stop ()

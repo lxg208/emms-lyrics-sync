@@ -456,9 +456,14 @@ the *opening* decision, never the *update* decision)."
             (setq emms-lyrics-sync-display--last-line-idx new-idx)
             (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms))
 
-          ;; 2b. Animation tick (fires only when doc is trivial/nil)
+          ;; 2b. Animation tick (fires only when doc is trivial/nil).
+          ;; Safety net: if animation is active but playback has ended
+          ;; (emms-player-stopped-hook not fired by persistent player),
+          ;; stop the animation here rather than leaving it running.
           (when (bound-and-true-p emms-lyrics-sync-display-anim--active)
-            (emms-lyrics-sync-display-anim-tick-update))
+            (if (not (bound-and-true-p emms-player-playing-p))
+                (emms-lyrics-sync-display-anim-stop)
+              (emms-lyrics-sync-display-anim-tick-update)))
 
           ;; 3. A2 word overlays
           (emms-lyrics-sync-display--update-word-overlays pos-ms)

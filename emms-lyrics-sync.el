@@ -156,6 +156,10 @@ Extracts metadata from the current EMMS track and kicks off the fetch pipeline."
 
 (defun emms-lyrics-sync--on-track-stop ()
   "Called by `emms-player-stopped-hook' and `emms-player-finished-hook'."
+  ;; Belt-and-suspenders: stop animation directly here in case
+  ;; display-on-stop is not reached (persistent player stop path).
+  (when (fboundp 'emms-lyrics-sync-display-anim-stop)
+    (emms-lyrics-sync-display-anim-stop))
   ;; Display handler runs first so it can read `current-track' (duration,
   ;; artist, title) before core clears it.  Each handler has independent
   ;; error handling so a failure in one doesn't skip the other.
@@ -175,10 +179,14 @@ while paused.  The last frame stays visible."
 
 (defun emms-lyrics-sync--on-track-resume ()
   "Called by `emms-player-resumed-hook'.
-Reconnects mpv IPC if it was dropped while paused, and resumes the
-no-lyrics animation if it was running."
+Reconnects mpv IPC if it was dropped while paused, resumes the
+no-lyrics animation, and restarts the display timer (some EMMS builds
+cancel it via the stopped-hook on pause)."
   (when (fboundp 'emms-lyrics-sync-display-anim-resume)
     (emms-lyrics-sync-display-anim-resume))
+  ;; Restart display timer — may have been stopped on pause
+  (when (fboundp 'emms-lyrics-sync-display--start-timer)
+    (emms-lyrics-sync-display--start-timer))
   (condition-case nil
       (emms-lyrics-sync-core--mpv-connect)
     (error nil)))
