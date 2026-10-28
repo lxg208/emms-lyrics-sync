@@ -35,6 +35,7 @@
 (require 'emms-lyrics-sync-display-vars)
 (require 'emms-lyrics-sync-display-render)
 (require 'emms-lyrics-sync-display-redraw)
+(require 'emms-lyrics-sync-display-anim)
 
 ;;; ── Major mode ──────────────────────────────────────────────────────────────
 
@@ -455,6 +456,10 @@ the *opening* decision, never the *update* decision)."
             (setq emms-lyrics-sync-display--last-line-idx new-idx)
             (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms))
 
+          ;; 2b. Animation tick (fires only when doc is trivial/nil)
+          (when (bound-and-true-p emms-lyrics-sync-display-anim--active)
+            (emms-lyrics-sync-display-anim-tick-update))
+
           ;; 3. A2 word overlays
           (emms-lyrics-sync-display--update-word-overlays pos-ms)
 
@@ -509,6 +514,10 @@ Guards:
       (when (emms-lyrics-sync-display--should-auto-show-p)
         (emms-lyrics-sync-display-show))
 
+      ;; 4c. Kill any running no-lyrics animation from previous track
+      ;;     (must come before --full-redraw which calls --render-lyrics)
+      (emms-lyrics-sync-display-anim-stop)
+
       ;; 1. Lyrics buffer (context window + word overlays)
       (emms-lyrics-sync-display--full-redraw)
 
@@ -538,6 +547,7 @@ Guards:
 
 (defun emms-lyrics-sync-display-on-stop ()
   "Called when playback stops (not on pause)."
+  (emms-lyrics-sync-display-anim-stop)
   (when (and (boundp 'emms-lyrics-sync-waveform-height)
              (> emms-lyrics-sync-waveform-height 0))
     (emms-lyrics-sync-display--redraw-waveform-window 0))

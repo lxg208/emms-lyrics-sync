@@ -36,6 +36,7 @@
 (require 'emms-lyrics-sync-core)
 (require 'emms-lyrics-sync-lrc)
 (require 'emms-lyrics-sync-display-vars)
+(require 'emms-lyrics-sync-display-anim)
 
 ;;; ── Cover Art ────────────────────────────────────────────────────────────────
 
@@ -112,31 +113,31 @@ window to fit the frame."
             (puthash key 'none emms-lyrics-sync-display--cover-cache)
             nil)))))))
 
-;; (defvar emms-lyrics-sync-display--placeholder-colors
-;;   '("#00E5FF"  ; Cyan A400
-;;     "#1DE9B6"  ; Teal A400
-;;     "#448AFF"  ; Blue A200
-;;     "#FF4081"  ; Pink A200
-;;     "#7C4DFF"  ; Deep Purple A200
-;;     "#FFAB40"  ; Orange A200
-;;     "#69F0AE"  ; Green A200
-;;     "#FF6E40"  ; Deep Orange A200
-;;     "#40C4FF"  ; Light Blue A200
-;;     "#E040FB") ; Purple A200
-;;   "Vivid Material accent colors for placeholder cover shapes.")
-
 (defvar emms-lyrics-sync-display--placeholder-colors
-  '("#1565C0" ; Blue 800
-    "#00695C" ; Teal 800
-    "#4527A0" ; Deep Purple 800
-    "#00838F" ; Cyan 800
-    "#AD1457" ; Pink 800
-    "#2E7D32" ; Green 800
-    "#E65100" ; Deep Orange 800
-    "#1A237E" ; Indigo 900
-    "#37474F" ; Blue Grey 800
-    "#6A1B9A") ; Purple 800
-  "Material Design 800-level colors for placeholder cover circles.")
+  '("#00E5FF"  ; Cyan A400
+    "#1DE9B6"  ; Teal A400
+    "#448AFF"  ; Blue A200
+    "#FF4081"  ; Pink A200
+    "#7C4DFF"  ; Deep Purple A200
+    "#FFAB40"  ; Orange A200
+    "#69F0AE"  ; Green A200
+    "#FF6E40"  ; Deep Orange A200
+    "#40C4FF"  ; Light Blue A200
+    "#E040FB") ; Purple A200
+  "Vivid Material accent colors for placeholder cover shapes.")
+
+;; (defvar emms-lyrics-sync-display--placeholder-colors
+;;   '("#1565C0" ; Blue 800
+;;     "#00695C" ; Teal 800
+;;     "#4527A0" ; Deep Purple 800
+;;     "#00838F" ; Cyan 800
+;;     "#AD1457" ; Pink 800
+;;     "#2E7D32" ; Green 800
+;;     "#E65100" ; Deep Orange 800
+;;     "#1A237E" ; Indigo 900
+;;     "#37474F" ; Blue Grey 800
+;;     "#6A1B9A") ; Purple 800
+;;   "Material Design 800-level colors for placeholder cover circles.")
 
 (defvar emms-lyrics-sync-display--placeholder-shapes
   '(circle ellipse-h ellipse-v rect)
@@ -546,9 +547,17 @@ Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
 (defun emms-lyrics-sync-display--render-lyrics (doc pos-ms)
   "Insert the full lyrics for DOC at POS-MS, setting faces and markers."
   (setq emms-lyrics-sync-display--word-positions nil)
-  (if (null doc)
-      (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
-                          'face 'emms-lyrics-sync-past-line-face) "\n")
+  ;; Trivial doc = nil, or 1-2 lines that are blank / instrumental markers.
+  ;; Try the breathing-bar animation; if disabled or librsvg unavailable,
+  ;; render-initial returns nil and (or ...) falls through to plain text.
+  ;; Paren structure is unchanged from the original (if THEN ELSE).
+  (if (emms-lyrics-sync-display-anim--trivial-doc-p doc)
+      (or (progn
+            (emms-lyrics-sync-display-anim-stop)
+            (emms-lyrics-sync-display-anim-render-initial
+             emms-lyrics-sync-core--current-track))
+          (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")
+                              'face 'emms-lyrics-sync-past-line-face) "\n"))
     (let* ((lines   (emms-lyrics-sync-lrc-doc-lines doc))
            (n       (length lines))
            (cur-idx (emms-lyrics-sync-lrc-seek doc pos-ms)))

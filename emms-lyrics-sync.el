@@ -168,14 +168,17 @@ Extracts metadata from the current EMMS track and kicks off the fetch pipeline."
 
 (defun emms-lyrics-sync--on-track-pause ()
   "Called by `emms-player-paused-hook'.
-The display continues to show the last position — no action needed."
-  ;; The display timer keeps running while paused; it will show the
-  ;; frozen position.  Nothing extra to do.
-  nil)
+Freezes the no-lyrics animation so it does not keep regenerating SVGs
+while paused.  The last frame stays visible."
+  (when (fboundp 'emms-lyrics-sync-display-anim-pause)
+    (emms-lyrics-sync-display-anim-pause)))
 
 (defun emms-lyrics-sync--on-track-resume ()
   "Called by `emms-player-resumed-hook'.
-Reconnects mpv IPC if it was dropped while paused."
+Reconnects mpv IPC if it was dropped while paused, and resumes the
+no-lyrics animation if it was running."
+  (when (fboundp 'emms-lyrics-sync-display-anim-resume)
+    (emms-lyrics-sync-display-anim-resume))
   (condition-case nil
       (emms-lyrics-sync-core--mpv-connect)
     (error nil)))
