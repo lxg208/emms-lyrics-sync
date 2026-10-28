@@ -356,8 +356,12 @@ Schedules the Phase-2 ffprobe run at
   (unless emms-lyrics-sync-display-anim-enabled
     (cl-return-from emms-lyrics-sync-display-anim-render-initial nil))
   (emms-lyrics-sync-display-anim--seed track)
-  (setq emms-lyrics-sync-display-anim--active t
-        emms-lyrics-sync-display-anim--paused nil)
+  ;; --paused is intentionally NOT reset here.  When the lyrics
+  ;; pipeline completes while playback is paused, anim-stop is called
+  ;; with preserve-paused=t and then render-initial rebuilds the
+  ;; overlay.  Clearing --paused here would restart the animation
+  ;; while playback is still paused.  anim-resume clears it on unpause.
+  (setq emms-lyrics-sync-display-anim--active t)
   (if (not (display-graphic-p))
       ;; ── Terminal fallback ──────────────────────────────────────────
       (insert
@@ -409,7 +413,23 @@ accurate.  The SVG image is regenerated only every
 `emms-lyrics-sync-display-anim-tick-divisor' ticks, throttling the
 librsvg parsing CPU cost on remote X11 (S195/Kronos).
 
+Self-healing: syncs --paused from `emms-player-paused-p' on every
+call so the animation corrects itself within 100ms even when
+`emms-player-resumed-hook' fails to fire (a known race in the
+persistent mpv player's IPC event ordering).
+
 No-op when: inactive, paused, on a terminal frame, or overlay is gone."
+  (when emms-lyrics-sync-display-anim--active
+    ;; Self-heal: mirror the real EMMS pause state so we correct within
+    ;; one tick even if emms-player-resumed-hook never arrived.
+    (let ((emms-paused (bound-and-true-p emms-player-paused-p)))
+      (when (not (eq emms-lyrics-sync-display-anim--paused emms-paused))
+        (setq emms-lyrics-sync-display-anim--paused emms-paused)
+        ;; On transition to unpaused: reset tick so first render fires
+        ;; immediately (mod 0 divisor fires at next increment to divisor-1+1).
+        (unless emms-paused
+          (setq emms-lyrics-sync-display-anim--tick
+                (1- (max 1 emms-lyrics-sync-display-anim-tick-divisor)))))))
   (when (and emms-lyrics-sync-display-anim--active
              (not emms-lyrics-sync-display-anim--paused)
              (display-graphic-p)
@@ -437,22 +457,52 @@ The overlay and last image are preserved — the display is not blank."
 
 ;;;###autoload
 (defun emms-lyrics-sync-display-anim-resume ()
-  "Unfreeze the animation (called when playback resumes).
-Renders one frame immediately so the display updates without waiting
-for the next tick-divisor boundary (up to 300 ms at divisor=3)."
+  "Unfreeze the animation, or restart it if it was killed during pause.
+
+Two cases handled:
+
+Normal — --active is t and overlay is alive.  Clear --paused, reset
+tick to 0, render one frame immediately so resume is instant.
+
+Degraded — --active is nil or overlay was killed.  Happens when
+emms-player-stopped-hook fires during pause (the persistent mpv player
+does this on some paths), which chains through display-on-stop ->
+anim-stop -> kills overlay and clears --active.  In this case
+re-trigger redraw-lyrics-only so --render-lyrics runs again and calls
+render-initial for the trivial/nil doc, rebuilding the overlay fresh."
   (setq emms-lyrics-sync-display-anim--paused nil)
-  ;; Reset the tick counter to 0 so the very next tick-update call
-  ;; (mod tick divisor) = 0 and triggers a render immediately.
-  ;; This avoids duplicating the SVG generation logic here.
-  (setq emms-lyrics-sync-display-anim--tick 0)
-  (emms-lyrics-sync-display-anim-tick-update))
+  (cond
+   ;; Normal: animation still alive — resume in-place.
+   ;; Set tick to (divisor-1) so the very first tick-update call
+   ;; increments to divisor, (mod divisor divisor)=0 → renders
+   ;; immediately rather than waiting up to divisor×100ms.
+   ((and emms-lyrics-sync-display-anim--active
+         (overlayp emms-lyrics-sync-display-anim--overlay)
+         (overlay-buffer emms-lyrics-sync-display-anim--overlay))
+    (setq emms-lyrics-sync-display-anim--tick
+          (1- (max 1 emms-lyrics-sync-display-anim-tick-divisor)))
+    (emms-lyrics-sync-display-anim-tick-update))
+   ;; Degraded: overlay gone — rebuild via lyrics redraw
+   ((and (buffer-live-p emms-lyrics-sync-display--buffer)
+         (fboundp 'emms-lyrics-sync-display--redraw-lyrics-only))
+    (let* ((result emms-lyrics-sync-core--current-result)
+           (doc    (when result (emms-lyrics-sync-result-doc result)))
+           (pos-ms (or (and (fboundp 'emms-lyrics-sync-core--playback-position-ms)
+                            (emms-lyrics-sync-core--playback-position-ms))
+                       0)))
+      (when (emms-lyrics-sync-display-anim--trivial-doc-p doc)
+        (emms-lyrics-sync-display--redraw-lyrics-only doc pos-ms))))))
 
 ;;;###autoload
-(defun emms-lyrics-sync-display-anim-stop ()
+(defun emms-lyrics-sync-display-anim-stop (&optional preserve-paused)
   "Stop the animation and release all resources.
-Called when real lyrics arrive, playback stops, or track changes."
-  (setq emms-lyrics-sync-display-anim--active nil
-        emms-lyrics-sync-display-anim--paused nil)
+Called when real lyrics arrive, playback stops, or track changes.
+When PRESERVE-PAUSED is non-nil, --paused is left unchanged so that
+a rebuild triggered while playback is paused (lyrics pipeline returned
+nil after the user pressed P) does not restart the animation."
+  (setq emms-lyrics-sync-display-anim--active nil)
+  (unless preserve-paused
+    (setq emms-lyrics-sync-display-anim--paused nil))
   (when emms-lyrics-sync-display-anim--ffprobe-timer
     (cancel-timer emms-lyrics-sync-display-anim--ffprobe-timer)
     (setq emms-lyrics-sync-display-anim--ffprobe-timer nil))

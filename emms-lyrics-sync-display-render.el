@@ -553,7 +553,10 @@ Returns a vector of (buf-start buf-end emms-lyrics-sync-word) triples."
   ;; Paren structure is unchanged from the original (if THEN ELSE).
   (if (emms-lyrics-sync-display-anim--trivial-doc-p doc)
       (or (progn
-            (emms-lyrics-sync-display-anim-stop)
+            ;; Pass t so --paused is preserved when the lyrics pipeline
+            ;; completes while playback is paused (prevents animation
+            ;; restarting on its own during a pause).
+            (emms-lyrics-sync-display-anim-stop t)
             (emms-lyrics-sync-display-anim-render-initial
              emms-lyrics-sync-core--current-track))
           (insert (propertize (emms-lyrics-sync-display--center "(no lyrics)")

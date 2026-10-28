@@ -179,12 +179,10 @@ while paused.  The last frame stays visible."
 
 (defun emms-lyrics-sync--on-track-resume ()
   "Called by `emms-player-resumed-hook'.
-Reconnects mpv IPC if it was dropped while paused, resumes the
-no-lyrics animation, and restarts the display timer (some EMMS builds
-cancel it via the stopped-hook on pause)."
+Reconnects mpv IPC if it was dropped while paused, and resumes the
+no-lyrics animation if it was running."
   (when (fboundp 'emms-lyrics-sync-display-anim-resume)
     (emms-lyrics-sync-display-anim-resume))
-  ;; Restart display timer — may have been stopped on pause
   (when (fboundp 'emms-lyrics-sync-display--start-timer)
     (emms-lyrics-sync-display--start-timer))
   (condition-case nil
