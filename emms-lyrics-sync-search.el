@@ -291,7 +291,9 @@ Pre-fills all metadata fields; user edits and confirms with \\[emms-lyrics-sync-
        (if results
            (emms-lyrics-sync-search--show-results results search-track)
          (message "emms-lyrics: no lyrics found for %S"
-         (or (emms-lyrics-sync-track-title track) "unknown")))))))
+                  ;; FIXED: was `track' — free variable → void-variable
+                  ;; under lexical-binding whenever results was nil.
+                  (or (emms-lyrics-sync-track-title search-track) "unknown")))))))
 
 (defun emms-lyrics-sync-search--query-parallel (track sources callback)
   "Query all SOURCES for TRACK in parallel; call CALLBACK with result list.
@@ -310,31 +312,29 @@ sorted by source priority.  Waits up to `emms-lyrics-sync-search-timeout' second
           (funcall src track
                    (let ((i idx))
                      (lambda (result)
-                       ;; Inner condition-case: plz delivers responses via
-                       ;; plz--respond, a timer that fires outside the outer
-                       ;; condition-case below.  If that timer crashes (e.g.
-                       ;; void-variable point in older plz), the lambda is
-                       ;; never called and done-count is never incremented.
-                       ;; This inner guard ensures done-count advances even
-                       ;; when the callback itself errors, so the parallel
-                       ;; engine always terminates cleanly.
+                       ;; Only the per-source result assignment is guarded:
+                       ;; a bad result from one source must not take the
+                       ;; whole search down, but everything after this
+                       ;; point (increment + aggregate) must run exactly
+                       ;; once per source, error or no error.
                        (condition-case cb-err
-                           (progn
-                             (aset results i result)
-                             (cl-incf done-count)
-                             (when (= done-count n-sources)
-                               (cancel-timer deadline)
-                               (funcall callback
-                                        (delq nil (append results nil)))))
+                           (aset results i result)
                          (error
-                          (message "emms-lyrics-sync-search: async callback error (source %d): %S"
-                                   i cb-err)
-                          (cl-incf done-count)
-                          (when (= done-count n-sources)
-                            (cancel-timer deadline)
-                            (funcall callback
-                                     (delq nil (append results nil)))))))))
+                          (message "emms-lyrics-sync-search: result store error (source %d): %S"
+                                   i cb-err)))
+                       (cl-incf done-count)
+                       (when (= done-count n-sources)
+                         (cancel-timer deadline)
+                         ;; Aggregate call OUTSIDE the inner condition-case:
+                         ;; an error here is a genuine bug in the aggregate
+                         ;; callback and should not be reported as a
+                         ;; per-source error.
+                         (funcall callback
+                                  (delq nil (append results nil)))))))
         (error
+         ;; Sync source errored before its async callback could fire —
+         ;; account for it so the aggregate still runs once everyone is
+         ;; done.  Only one increment path for this source.
          (message "emms-lyrics-sync-search: source %S error: %S" src err)
          (cl-incf done-count)
          (when (= done-count n-sources)
