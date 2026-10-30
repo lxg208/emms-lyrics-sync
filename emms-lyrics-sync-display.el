@@ -233,7 +233,7 @@ Player controls inherit from `emms-playlist-mode-map' (set via
 `set-keymap-parent' after `emms-playlist-mode' loads), so pause,
 next, previous, mute, volume, seek, and speed work identically to
 the playlist and lyrics buffers.  F3 L bindings come from the
-global `emms-lyrics-sync-mode-map' and are active here automatically
+global `yxz11-emms-global-map' and are active here automatically
 because the minor mode is global.")
 
 (with-eval-after-load 'emms-playlist-mode

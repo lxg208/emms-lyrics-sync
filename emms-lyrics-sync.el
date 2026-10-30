@@ -59,31 +59,6 @@
 (require 'emms-lyrics-sync-qqmusic)
 (require 'emms-lyrics-sync-lyricsovh)
 
-;;; ── Keymap ───────────────────────────────────────────────────────────────────
-;; FIX: keymap MUST be defined before define-minor-mode, which references it.
-
-(defvar emms-lyrics-sync-mode-map
-  (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "<f3> L s") #'emms-lyrics-sync-search)
-    (define-key m (kbd "<f3> L n") #'emms-lyrics-sync-next-source)
-    (define-key m (kbd "<f3> L t") #'emms-lyrics-sync-toggle-window)
-    (define-key m (kbd "<f3> L c") #'emms-lyrics-sync-display-tune-cjk-scale)
-    (define-key m (kbd "<f3> L r") #'emms-lyrics-sync-reload)
-    (define-key m (kbd "<f3> L o") #'emms-lyrics-sync-open-sidecar)
-    m)
-  "Keymap for `emms-lyrics-sync-mode'.
-
-Prefix is <f3> L (uppercase).  <f3> l (lowercase) is reserved for
-`yxz11-copy-paste-lines' in the user's personal `yxz11-map'.
-
-WARNING: This map is active in EVERY buffer because
-`emms-lyrics-sync-mode' is a global minor mode.  Never bind
-single-letter keys here — they would shadow those keys in every
-buffer.  Buffer-specific bindings belong in the corresponding
-mode's map (`emms-lyrics-sync-display-mode-map',
-`emms-lyrics-sync-waveform-mode-map',
-`emms-lyrics-sync-results-mode-map').")
-
 ;;; ── Minor Mode ───────────────────────────────────────────────────────────────
 
 ;;;###autoload
@@ -105,7 +80,6 @@ Keybindings (global when mode is active):
   :global  t
   :lighter " ♪"
   :group   'emms-lyrics-sync
-  :keymap  emms-lyrics-sync-mode-map
   (if emms-lyrics-sync-mode
       (emms-lyrics-sync--enable)
     (emms-lyrics-sync--disable)))
