@@ -409,6 +409,20 @@ Placeholder only generated when `display-cover-placeholder' is non-nil."
 
 ;;; ── Header Rendering ─────────────────────────────────────────────────────────
 
+(defun emms-lyrics-sync-display--audio-exclusive-p ()
+  "Return non-nil when the persistent mpv is configured for exclusive output.
+Soft dependency: only true when yxz11-emms-mpv-exclusive is loaded AND
+reports its args active.  On non-WSL platforms the module is absent, so
+this always returns nil — matching the fact that WASAPI exclusive output
+is a Windows-only concept.
+
+Note: this reflects the *configured* state (whether --audio-exclusive=yes
+is in emms-player-mpv-persistent-extra-args), not a live IPC query of a
+running mpv.  In practice they agree: args only change at restart time,
+and the header is re-rendered on every track change."
+  (and (fboundp 'yxz11-emms-mpv-exclusive-active-p)
+       (yxz11-emms-mpv-exclusive-active-p)))
+
 (defun emms-lyrics-sync-display--sr-string (hz)
   "Format sample-rate HZ as \"44.1\" or \"48\" kHz for the tech line."
   (when (and (integerp hz) (> hz 0))
@@ -450,8 +464,10 @@ not here.  Returns nil."
                        (sr-s           sr-s)
                        (t              nil)))
          (kbps-s (when (and kbps (> kbps 0)) (format "%d kbps" kbps)))
-         (l4     (let ((parts (delq nil (list codec bps/sr kbps-s ch))))
-                   (when parts (mapconcat #'identity parts " | ")))))
+	 (l4     (let ((parts (delq nil (list codec bps/sr kbps-s ch
+					      (when (emms-lyrics-sync-display--audio-exclusive-p)
+						"EXCL")))))
+		   (when parts (mapconcat #'identity parts " | ")))))
     (insert (propertize (emms-lyrics-sync-display--center l1)
                         'face 'emms-lyrics-sync-artist-face) "\n")
     (when l2
